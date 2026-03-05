@@ -1,0 +1,9 @@
+[package]
+name = "photo-models"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+photo-core = { path = "../photo-core" }
+photo-imageops = { path = "../photo-imageops" }
+photo-onnx = { path = "../photo-onnx" }

@@ -1,0 +1,13 @@
+[package]
+name = "photo-backend-tract"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+backend = ["dep:tract-onnx", "dep:ndarray"]
+
+[dependencies]
+ndarray = { workspace = true, optional = true }
+photo-onnx = { path = "../photo-onnx" }
+tract-onnx = { version = "0.21", optional = true }

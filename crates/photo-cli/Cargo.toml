@@ -1,0 +1,18 @@
+[package]
+name = "photo-cli"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+ort-backend = ["photo-backend-ort/backend"]
+tract-backend = ["photo-backend-tract/backend"]
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+photo-backend-ort = { path = "../photo-backend-ort" }
+photo-backend-tract = { path = "../photo-backend-tract" }
+photo-core = { path = "../photo-core" }
+photo-imageops = { path = "../photo-imageops" }
+photo-models = { path = "../photo-models" }

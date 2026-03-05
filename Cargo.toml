@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "crates/photo-core",
+    "crates/photo-imageops",
+    "crates/photo-onnx",
+    "crates/photo-backend-ort",
+    "crates/photo-backend-tract",
+    "crates/photo-models",
+    "crates/photo-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+authors = ["shaoyuanyu"]
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+image = "0.25"
+ndarray = "0.16"
+thiserror = "2"

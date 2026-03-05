@@ -1,0 +1,13 @@
+[package]
+name = "photo-backend-ort"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+backend = ["dep:ort", "dep:ndarray"]
+
+[dependencies]
+ndarray = { workspace = true, optional = true }
+ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray", "load-dynamic"], optional = true }
+photo-onnx = { path = "../photo-onnx" }

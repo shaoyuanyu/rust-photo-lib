@@ -1,0 +1,87 @@
+use std::path::{Path, PathBuf};
+
+use photo_onnx::{NamedTensor, OnnxEngine, OnnxError, Result, SessionOptions};
+
+#[derive(Default)]
+pub struct OrtEngine {
+    model_path: Option<PathBuf>,
+    #[cfg(feature = "backend")]
+    session: Option<ort::session::Session>,
+}
+
+impl OnnxEngine for OrtEngine {
+    fn backend_name(&self) -> &'static str {
+        "ort"
+    }
+
+    fn load_model<P: AsRef<Path>>(&mut self, path: P, _options: SessionOptions) -> Result<()> {
+        let model_path = path.as_ref().to_path_buf();
+
+        #[cfg(feature = "backend")]
+        {
+            let session = ort::session::Session::builder()
+                .map_err(|err| OnnxError::Inference(err.to_string()))?
+                .commit_from_file(&model_path)
+                .map_err(|err| OnnxError::Inference(err.to_string()))?;
+            self.session = Some(session);
+            self.model_path = Some(model_path);
+            return Ok(());
+        }
+
+        #[cfg(not(feature = "backend"))]
+        {
+            let _ = &model_path;
+            Err(OnnxError::BackendUnavailable(
+                "photo-backend-ort built without `backend` feature".into(),
+            ))
+        }
+    }
+
+    fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>> {
+        if self.model_path.is_none() {
+            return Err(OnnxError::ModelNotLoaded);
+        }
+
+        #[cfg(feature = "backend")]
+        {
+            let session = self.session.as_mut().ok_or(OnnxError::ModelNotLoaded)?;
+            if inputs.is_empty() {
+                return Err(OnnxError::InvalidTensor("inputs must not be empty".into()));
+            }
+
+            let mut ort_inputs = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                let tensor =
+                    ort::value::Tensor::from_array((input.shape.clone(), input.data.clone()))
+                        .map_err(|err| OnnxError::InvalidTensor(err.to_string()))?;
+                ort_inputs.push((input.name.clone(), tensor));
+            }
+
+            let outputs = session
+                .run(ort_inputs)
+                .map_err(|err| OnnxError::Inference(err.to_string()))?;
+
+            let mut named = Vec::with_capacity(outputs.len());
+            for (idx, out) in outputs.into_iter().enumerate() {
+                let tensor = out
+                    .1
+                    .try_extract_array::<f32>()
+                    .map_err(|err| OnnxError::Inference(err.to_string()))?;
+                named.push(NamedTensor {
+                    name: format!("output_{idx}"),
+                    shape: tensor.shape().to_vec(),
+                    data: tensor.iter().copied().collect(),
+                });
+            }
+            return Ok(named);
+        }
+
+        #[cfg(not(feature = "backend"))]
+        {
+            let _ = inputs;
+            Err(OnnxError::BackendUnavailable(
+                "photo-backend-ort built without `backend` feature".into(),
+            ))
+        }
+    }
+}
