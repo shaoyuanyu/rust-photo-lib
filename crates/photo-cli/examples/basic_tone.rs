@@ -1,8 +1,11 @@
+//! 基础调色示例。
+
 use std::path::PathBuf;
 
 use photo_core::{BasicAdjustments, Pipeline};
 use photo_imageops::{BasicAdjustStage, load_image, save_image};
 
+/// 示例入口：应用基础调色并保存输出。
 fn main() {
     let input = PathBuf::from("input.jpg");
     let output = PathBuf::from("output_tone.jpg");

@@ -1,19 +1,26 @@
+//! ONNX Runtime 后端实现。
+
 use std::path::{Path, PathBuf};
 
 use photo_onnx::{NamedTensor, OnnxEngine, OnnxError, Result, SessionOptions};
 
+/// ONNX Runtime 引擎封装。
 #[derive(Default)]
 pub struct OrtEngine {
+    /// 已加载的模型路径。
     model_path: Option<PathBuf>,
     #[cfg(feature = "backend")]
+    /// 启用后端特性时的 ORT 会话。
     session: Option<ort::session::Session>,
 }
 
 impl OnnxEngine for OrtEngine {
+    /// 后端标识。
     fn backend_name(&self) -> &'static str {
         "ort"
     }
 
+    /// 加载 ONNX 模型到 ORT。
     fn load_model<P: AsRef<Path>>(&mut self, path: P, _options: SessionOptions) -> Result<()> {
         let model_path = path.as_ref().to_path_buf();
 
@@ -37,6 +44,7 @@ impl OnnxEngine for OrtEngine {
         }
     }
 
+    /// 使用已加载模型执行推理。
     fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>> {
         if self.model_path.is_none() {
             return Err(OnnxError::ModelNotLoaded);

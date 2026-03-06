@@ -1,11 +1,16 @@
+//! Tract ONNX 后端实现。
+
 use std::path::{Path, PathBuf};
 
 use photo_onnx::{NamedTensor, OnnxEngine, OnnxError, Result, SessionOptions};
 
+/// Tract 引擎封装。
 #[derive(Default)]
 pub struct TractEngine {
+    /// 已加载的模型路径。
     model_path: Option<PathBuf>,
     #[cfg(feature = "backend")]
+    /// 启用后端特性时的可执行计划。
     runnable: Option<
         tract_onnx::prelude::SimplePlan<
             tract_onnx::prelude::TypedFact,
@@ -19,10 +24,12 @@ pub struct TractEngine {
 }
 
 impl OnnxEngine for TractEngine {
+    /// 后端标识。
     fn backend_name(&self) -> &'static str {
         "tract"
     }
 
+    /// 加载 ONNX 模型到 Tract。
     fn load_model<P: AsRef<Path>>(&mut self, path: P, _options: SessionOptions) -> Result<()> {
         let model_path = path.as_ref().to_path_buf();
 
@@ -50,6 +57,7 @@ impl OnnxEngine for TractEngine {
         }
     }
 
+    /// 使用已加载模型执行推理。
     fn run(&mut self, inputs: &[NamedTensor]) -> Result<Vec<NamedTensor>> {
         if self.model_path.is_none() {
             return Err(OnnxError::ModelNotLoaded);

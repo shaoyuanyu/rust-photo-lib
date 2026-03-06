@@ -1,3 +1,5 @@
+//! 风格迁移模型封装与执行逻辑。
+
 use std::path::{Path, PathBuf};
 
 use photo_core::{ImageFrame, PhotoError, Result};
@@ -7,14 +9,19 @@ use photo_imageops::{
 };
 use photo_onnx::{NamedTensor, OnnxEngine, SessionOptions};
 
+/// 风格迁移模型的归一化模式。
 #[derive(Debug, Clone, Copy)]
 pub enum StyleTransferNormalization {
+    /// 0..1 归一化。
     ZeroOne,
+    /// -1..1 归一化。
     MinusOneOne,
+    /// 0..255 归一化。
     ZeroTwoFiftyFive,
 }
 
 impl StyleTransferNormalization {
+    /// 映射到图像工具层的归一化类型。
     fn as_tensor_normalization(self) -> TensorNormalization {
         match self {
             Self::ZeroOne => TensorNormalization::ZeroOne,
@@ -24,13 +31,17 @@ impl StyleTransferNormalization {
     }
 }
 
+/// 模型输入尺寸的缩放策略。
 #[derive(Debug, Clone, Copy)]
 pub enum StyleTransferResizePolicy {
+    /// 保持原始尺寸。
     Original,
+    /// 限制最大边并对齐到倍数。
     MaxDimensionMultiple { max_dim: u32, multiple: u32 },
 }
 
 impl StyleTransferResizePolicy {
+    /// 计算目标尺寸。
     fn target_size(self, source_width: u32, source_height: u32) -> (u32, u32) {
         match self {
             Self::Original => (source_width, source_height),
@@ -41,17 +52,25 @@ impl StyleTransferResizePolicy {
     }
 }
 
+/// 风格迁移模型配置。
 #[derive(Debug, Clone)]
 pub struct StyleTransferModel {
+    /// ONNX 模型路径。
     pub model_path: PathBuf,
+    /// 期望的输入张量名称。
     pub input_name: String,
+    /// 可选的输出张量名称。
     pub output_name: Option<String>,
+    /// 可选的固定输入尺寸。
     pub input_size: Option<(u32, u32)>,
+    /// 输入缩放策略。
     pub resize_policy: StyleTransferResizePolicy,
+    /// 输入/输出归一化方式。
     pub normalization: StyleTransferNormalization,
 }
 
 impl StyleTransferModel {
+    /// 创建默认配置的模型封装。
     pub fn new<P: AsRef<Path>>(model_path: P) -> Self {
         Self {
             model_path: model_path.as_ref().to_path_buf(),
@@ -66,6 +85,7 @@ impl StyleTransferModel {
         }
     }
 
+    /// 使用给定 ONNX 引擎执行风格迁移。
     pub fn run<E: OnnxEngine>(&self, engine: &mut E, image: &ImageFrame) -> Result<ImageFrame> {
         let (target_w, target_h) = if let Some(input_size) = self.input_size {
             input_size
@@ -154,6 +174,7 @@ impl StyleTransferModel {
         }
     }
 
+    /// 构建输入名称候选列表以提升兼容性。
     fn input_name_candidates(&self) -> Vec<String> {
         const FALLBACKS: &[&str] = &["input1", "input", "image", "x"];
 
@@ -176,19 +197,27 @@ mod tests {
 
     use super::*;
 
+    /// 用于验证逻辑的模拟引擎。
     struct MockEngine {
+        /// 可接受的输入名称（可选）。
         accepted_input_name: Option<String>,
+        /// 模拟输出的形状。
         output_shape: Vec<usize>,
+        /// 模拟输出的数据。
         output_data: Vec<f32>,
+        /// 记录已见的输入名称。
         seen_input_names: Vec<String>,
+        /// 记录已见的输入形状。
         seen_input_shape: Option<Vec<usize>>,
     }
 
     impl OnnxEngine for MockEngine {
+        /// 后端标识。
         fn backend_name(&self) -> &'static str {
             "mock"
         }
 
+        /// 模拟加载模型（无操作）。
         fn load_model<P: AsRef<Path>>(
             &mut self,
             _path: P,
@@ -197,6 +226,7 @@ mod tests {
             Ok(())
         }
 
+        /// 校验输入并返回模拟输出。
         fn run(&mut self, inputs: &[NamedTensor]) -> OnnxResult<Vec<NamedTensor>> {
             let input = inputs
                 .first()
@@ -222,6 +252,7 @@ mod tests {
         }
     }
 
+    /// 验证输出被调整回输入尺寸。
     #[test]
     fn style_transfer_returns_same_size_image() {
         let input = ImageFrame::new(
@@ -253,6 +284,7 @@ mod tests {
         assert_eq!(output.data.len(), input.data.len());
     }
 
+    /// 验证非法输出形状会被拒绝。
     #[test]
     fn style_transfer_rejects_invalid_shape() {
         let input = ImageFrame::new(1, 1, vec![10, 20, 30]).expect("valid frame");
@@ -274,6 +306,7 @@ mod tests {
         }
     }
 
+    /// 验证默认配置的值。
     #[test]
     fn style_transfer_defaults_match_legacy_project_behavior() {
         let model = StyleTransferModel::new("dummy.onnx");
@@ -291,6 +324,7 @@ mod tests {
         ));
     }
 
+    /// 验证输入名称候选的重试顺序。
     #[test]
     fn style_transfer_retries_input_name_candidates() {
         let input = ImageFrame::new(1, 1, vec![10, 20, 30]).expect("valid frame");
@@ -311,6 +345,7 @@ mod tests {
         assert_eq!(engine.seen_input_names, vec!["input", "input1"]);
     }
 
+    /// 验证默认缩放策略会限制最大边并对齐倍数。
     #[test]
     fn style_transfer_uses_default_max_dim_multiple_resize() {
         let input = ImageFrame::new(1600, 900, vec![128; 1600 * 900 * 3]).expect("valid frame");

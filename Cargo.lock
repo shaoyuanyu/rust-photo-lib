@@ -1073,6 +1073,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndarray"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
+dependencies = [
+ "matrixmultiply",
+ "num-complex",
+ "num-integer",
+ "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
+ "rawpointer",
+]
+
+[[package]]
 name = "new_debug_unreachable"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1231,7 +1246,7 @@ version = "2.0.0-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
 dependencies = [
- "ndarray",
+ "ndarray 0.16.1",
  "ort-sys",
  "smallvec 2.0.0-alpha.10",
  "tracing",
@@ -1347,7 +1362,7 @@ dependencies = [
 name = "photo-backend-ort"
 version = "0.1.0"
 dependencies = [
- "ndarray",
+ "ndarray 0.17.2",
  "ort",
  "photo-onnx",
 ]
@@ -1356,7 +1371,7 @@ dependencies = [
 name = "photo-backend-tract"
 version = "0.1.0"
 dependencies = [
- "ndarray",
+ "ndarray 0.17.2",
  "photo-onnx",
  "tract-onnx",
 ]
@@ -2154,7 +2169,7 @@ dependencies = [
  "lazy_static",
  "log",
  "maplit",
- "ndarray",
+ "ndarray 0.16.1",
  "num-complex",
  "num-integer",
  "num-traits",
@@ -2179,7 +2194,7 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "maplit",
- "ndarray",
+ "ndarray 0.16.1",
  "nom 7.1.3",
  "num-integer",
  "num-traits",
