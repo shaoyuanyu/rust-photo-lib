@@ -14,7 +14,7 @@ resolver = "2"
 edition = "2024"
 version = "0.1.0"
 license = "GNU General Public License v3.0"
-authors = ["shaoyuanyu", "yanzulin", "taiyujin"]
+authors = ["shaoyuanyu", "nianzulin", "taiyujin"]
 
 [workspace.dependencies]
 anyhow = "1"

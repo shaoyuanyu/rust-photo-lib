@@ -87,6 +87,7 @@ impl StyleTransferModel {
 
     /// 使用给定 ONNX 引擎执行风格迁移。
     pub fn run<E: OnnxEngine>(&self, engine: &mut E, image: &ImageFrame) -> Result<ImageFrame> {
+        // 根据固定尺寸或缩放策略准备输入大小。
         let (target_w, target_h) = if let Some(input_size) = self.input_size {
             input_size
         } else {
@@ -102,6 +103,7 @@ impl StyleTransferModel {
             .load_model(&self.model_path, SessionOptions::default())
             .map_err(|e| PhotoError::Model(e.to_string()))?;
 
+        // 按输入名称候选列表尝试推理，兼容不同模型命名。
         let tensor_data = image_to_nchw_f32_with_normalization(
             &resized,
             self.normalization.as_tensor_normalization(),
@@ -139,18 +141,21 @@ impl StyleTransferModel {
         })?;
 
         let output = if let Some(name) = &self.output_name {
+            // 指定输出名称时按名称检索。
             outputs
                 .iter()
                 .find(|t| &t.name == name)
                 .cloned()
                 .ok_or_else(|| PhotoError::Model(format!("output tensor `{name}` not found")))?
         } else {
+            // 否则默认取第一个输出。
             outputs
                 .first()
                 .cloned()
                 .ok_or_else(|| PhotoError::Model("model returned no outputs".into()))?
         };
 
+        // 期望输出为 [1, 3, H, W]。
         if output.shape.len() != 4 || output.shape[0] != 1 || output.shape[1] != 3 {
             return Err(PhotoError::Model(format!(
                 "unexpected output shape: {:?}, expected [1,3,H,W]",
@@ -167,6 +172,7 @@ impl StyleTransferModel {
             self.normalization.as_tensor_normalization(),
         )?;
 
+        // 如果模型输出分辨率不同，拉伸回输入尺寸。
         if out_w != image.width || out_h != image.height {
             resize_rgb(&out_img, image.width, image.height)
         } else {
@@ -181,6 +187,7 @@ impl StyleTransferModel {
         let mut candidates = Vec::with_capacity(FALLBACKS.len() + 1);
         candidates.push(self.input_name.clone());
         for fallback in FALLBACKS {
+            // 去重以保持稳定的重试顺序。
             if !candidates.iter().any(|existing| existing == fallback) {
                 candidates.push((*fallback).to_string());
             }

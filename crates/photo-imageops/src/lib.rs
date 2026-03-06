@@ -27,6 +27,7 @@ pub struct BasicAdjustStage {
 }
 
 #[derive(Debug, Clone)]
+/// 应用编辑配方的管线阶段。
 pub struct PhotoEditStage {
     pub recipe: PhotoEditRecipe,
 }
@@ -126,7 +127,9 @@ pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> R
     )
 }
 
+/// 根据照片编辑配方执行全局与局部调整。
 pub fn apply_photo_edit_recipe(input: ImageFrame, recipe: &PhotoEditRecipe) -> Result<ImageFrame> {
+    // 按照全局 → 曲线 → HSL → 局部的顺序执行配方。
     let mut frame = apply_edit_stack(
         input,
         recipe.global,
@@ -145,6 +148,7 @@ fn apply_edit_stack(
     tone_curve: Option<&ToneCurve>,
     hsl: &BTreeMap<HslColor, HslAdjustment>,
 ) -> Result<ImageFrame> {
+    // 先应用全局调整，再叠加曲线与 HSL。
     let mut frame = apply_global_adjustments(input, global)?;
     if let Some(curve) = tone_curve {
         frame = apply_tone_curve(frame, curve)?;
@@ -155,6 +159,7 @@ fn apply_edit_stack(
     Ok(frame)
 }
 
+/// 应用曝光/对比度/色彩等全局调节。
 pub fn apply_global_adjustments(
     input: ImageFrame,
     params: GlobalAdjustments,
@@ -165,6 +170,7 @@ pub fn apply_global_adjustments(
     let saturation_mul = (1.0 + params.saturation).max(0.0);
 
     for chunk in out.chunks_exact_mut(3) {
+        // RGB 归一化到 0..1，便于在 HSV 空间调整。
         let mut r = chunk[0] as f32 / 255.0;
         let mut g = chunk[1] as f32 / 255.0;
         let mut b = chunk[2] as f32 / 255.0;
@@ -183,6 +189,7 @@ pub fn apply_global_adjustments(
 
         let (mut h, mut s, mut v) = rgb_to_hsv(r, g, b);
         let luma = rgb_luma(r, g, b);
+        // 亮度控制基于 luma 进行区域分配后，再做对比度缩放。
         v = apply_tone_controls(v, luma, params, contrast_mul);
         h += params.hue_shift_degrees;
         if h < 0.0 {
@@ -192,6 +199,7 @@ pub fn apply_global_adjustments(
             h -= 360.0;
         }
         s *= saturation_mul;
+        // 自然饱和度优先提升低饱和像素，并保护肤色与高光。
         s = apply_vibrance(s, params.vibrance, h, v);
         let (nr, ng, nb) = hsv_to_rgb(h, s, v);
 
@@ -203,18 +211,22 @@ pub fn apply_global_adjustments(
     ImageFrame::new(input.width, input.height, out)
 }
 
+/// 使用曲线对每个通道进行分段线性映射。
 pub fn apply_tone_curve(input: ImageFrame, curve: &ToneCurve) -> Result<ImageFrame> {
+    // 预处理曲线点以确保端点存在且按 x 排序。
     let curve_points = prepare_curve_points(curve);
     let mut out = input.data.clone();
 
     for value in &mut out {
         let normalized = *value as f32 / 255.0;
+        // 对每个通道执行分段线性插值。
         *value = to_u8(evaluate_curve(&curve_points, normalized));
     }
 
     ImageFrame::new(input.width, input.height, out)
 }
 
+/// 在 HSV 空间按色相区域应用 HSL 调整。
 pub fn apply_hsl_adjustments(
     input: ImageFrame,
     adjustments: &BTreeMap<HslColor, HslAdjustment>,
@@ -230,6 +242,7 @@ pub fn apply_hsl_adjustments(
         let mut hue_delta = 0.0;
         let mut saturation_delta = 0.0;
         let mut luminance_delta = 0.0;
+        // 依据色相中心做加权混合，避免色块边界突兀。
         for (color, adjustment) in adjustments {
             let weight = hue_weight(h, hsl_color_center(*color), 60.0);
             hue_delta += adjustment.hue * 45.0 * weight;
@@ -250,10 +263,12 @@ pub fn apply_hsl_adjustments(
     ImageFrame::new(input.width, input.height, out)
 }
 
+/// 应用单个局部调整层并按遮罩混合输出。
 pub fn apply_local_adjustment_layer(
     input: ImageFrame,
     layer: &LocalAdjustmentLayer,
 ) -> Result<ImageFrame> {
+    // 每个局部层都在完整图像上生成结果，再用遮罩混合。
     let edited = apply_edit_stack(
         input.clone(),
         layer.global,
@@ -340,6 +355,7 @@ pub fn nchw_f32_to_image_with_normalization(
     let width = width as usize;
     let height = height as usize;
     let plane = width * height;
+    // NCHW 需要 3 个平面并按 [1, 3, H, W] 展开。
     if data.len() != plane * 3 {
         return Err(PhotoError::Model(format!(
             "unexpected tensor length: {}, expected {}",
@@ -388,6 +404,7 @@ fn frame_to_rgb_image(frame: &ImageFrame) -> Result<RgbImage> {
 }
 
 fn apply_tone_controls(value: f32, luma: f32, params: GlobalAdjustments, contrast_mul: f32) -> f32 {
+    // 根据不同亮度区间累计调整，然后统一应用对比度。
     let with_tonal = (value + tonal_region_delta(params, luma)).clamp(0.0, 1.0);
     apply_contrast(with_tonal, contrast_mul)
 }
@@ -444,9 +461,11 @@ fn apply_vibrance(saturation: f32, vibrance: f32, hue: f32, value: f32) -> f32 {
     let highlight_protection = 1.0 - 0.20 * smoothstep(0.75, 1.0, value);
 
     if vibrance >= 0.0 {
+        // 正向振动优先提升低饱和区域。
         (saturation + vibrance * low_sat_bias * skin_protection * highlight_protection * 0.9)
             .clamp(0.0, 4.0)
     } else {
+        // 负向振动更温和地回落高饱和区域。
         let negative_rolloff = 0.55 + 0.45 * (1.0 - low_sat_bias);
         (saturation * (1.0 + vibrance * negative_rolloff)).clamp(0.0, 4.0)
     }
@@ -475,6 +494,7 @@ fn blend_with_mask(
             let context = PixelContext::new(base, x, y, width, height);
             let weight = opacity * evaluate_mask(mask, &context);
 
+            // 按遮罩权重在原图与编辑图之间线性混合。
             out[pixel] = blend_channel(base.data[pixel], edited.data[pixel], weight);
             out[pixel + 1] = blend_channel(base.data[pixel + 1], edited.data[pixel + 1], weight);
             out[pixel + 2] = blend_channel(base.data[pixel + 2], edited.data[pixel + 2], weight);
@@ -499,6 +519,7 @@ impl PixelContext {
         let b = frame.data[pixel + 2] as f32 / 255.0;
 
         Self {
+            // 使用像素中心位置并归一化到 0..1。
             x: (x as f32 + 0.5) / width as f32,
             y: (y as f32 + 0.5) / height as f32,
             luma: rgb_luma(r, g, b),
