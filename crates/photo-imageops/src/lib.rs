@@ -1,30 +1,41 @@
+//! 图像读写与基础处理工具。
+
 use std::path::Path;
 
 use image::{ImageBuffer, Rgb, RgbImage};
 use photo_core::{BasicAdjustments, ImageFrame, PhotoError, Result, Stage};
 
+/// 张量转换的归一化选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorNormalization {
+    /// 归一化到 0..1。
     ZeroOne,
+    /// 归一化到 -1..1。
     MinusOneOne,
+    /// 保持 0..255。
     ZeroTwoFiftyFive,
 }
 
+/// 应用基础调节的管线阶段。
 #[derive(Debug, Clone, Copy)]
 pub struct BasicAdjustStage {
+    /// 调整参数。
     pub params: BasicAdjustments,
 }
 
 impl Stage for BasicAdjustStage {
+    /// 阶段名称。
     fn name(&self) -> &'static str {
         "basic-adjust"
     }
 
+    /// 对输入帧应用基础调节。
     fn apply(&self, input: ImageFrame) -> Result<ImageFrame> {
         apply_basic_adjustments(input, self.params)
     }
 }
 
+/// 从磁盘加载图像并转换为 RGB 帧。
 pub fn load_image<P: AsRef<Path>>(path: P) -> Result<ImageFrame> {
     let img = image::open(path)
         .map_err(|err| PhotoError::InvalidImageData(err.to_string()))?
@@ -32,6 +43,7 @@ pub fn load_image<P: AsRef<Path>>(path: P) -> Result<ImageFrame> {
     ImageFrame::new(img.width(), img.height(), img.into_raw())
 }
 
+/// 将 RGB 帧保存到磁盘。
 pub fn save_image<P: AsRef<Path>>(frame: &ImageFrame, path: P) -> Result<()> {
     let image = frame_to_rgb_image(frame)?;
     image
@@ -39,6 +51,7 @@ pub fn save_image<P: AsRef<Path>>(frame: &ImageFrame, path: P) -> Result<()> {
         .map_err(|err| PhotoError::InvalidImageData(err.to_string()))
 }
 
+/// 将 RGB 帧缩放到指定尺寸。
 pub fn resize_rgb(frame: &ImageFrame, target_width: u32, target_height: u32) -> Result<ImageFrame> {
     let image = frame_to_rgb_image(frame)?;
     let resized = image::imageops::resize(
@@ -50,6 +63,7 @@ pub fn resize_rgb(frame: &ImageFrame, target_width: u32, target_height: u32) -> 
     ImageFrame::new(target_width, target_height, resized.into_raw())
 }
 
+/// 计算受最大边限制并对齐到指定倍数的尺寸。
 pub fn fit_within_max_and_multiple(
     width: u32,
     height: u32,
@@ -77,6 +91,7 @@ pub fn fit_within_max_and_multiple(
     (target_w.max(1), target_h.max(1))
 }
 
+/// 应用曝光/亮度/对比度/饱和度/色温/色调/色相调节。
 pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> Result<ImageFrame> {
     let mut out = input.data.clone();
     let exposure_mul = 2.0f32.powf(params.exposure);
@@ -121,6 +136,7 @@ pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> R
     ImageFrame::new(input.width, input.height, out)
 }
 
+/// 将 RGB 帧转为 NCHW f32（0..1 或 -1..1 归一化）。
 pub fn image_to_nchw_f32(frame: &ImageFrame, normalize_minus1_1: bool) -> Vec<f32> {
     let normalization = if normalize_minus1_1 {
         TensorNormalization::MinusOneOne
@@ -130,6 +146,7 @@ pub fn image_to_nchw_f32(frame: &ImageFrame, normalize_minus1_1: bool) -> Vec<f3
     image_to_nchw_f32_with_normalization(frame, normalization)
 }
 
+/// 将 RGB 帧转为 NCHW f32，并指定归一化模式。
 pub fn image_to_nchw_f32_with_normalization(
     frame: &ImageFrame,
     normalization: TensorNormalization,
@@ -171,6 +188,7 @@ pub fn image_to_nchw_f32_with_normalization(
     out
 }
 
+/// 将 NCHW f32 数据转为 RGB 帧（0..1 或 -1..1 归一化）。
 pub fn nchw_f32_to_image(
     width: u32,
     height: u32,
@@ -185,6 +203,7 @@ pub fn nchw_f32_to_image(
     nchw_f32_to_image_with_normalization(width, height, data, normalization)
 }
 
+/// 将 NCHW f32 数据转为 RGB 帧，并指定归一化模式。
 pub fn nchw_f32_to_image_with_normalization(
     width: u32,
     height: u32,
@@ -235,15 +254,18 @@ pub fn nchw_f32_to_image_with_normalization(
     ImageFrame::new(width as u32, height as u32, out)
 }
 
+/// 从帧构建 `RgbImage`。
 fn frame_to_rgb_image(frame: &ImageFrame) -> Result<RgbImage> {
     ImageBuffer::<Rgb<u8>, _>::from_raw(frame.width, frame.height, frame.data.clone())
         .ok_or_else(|| PhotoError::InvalidImageData("failed to create image buffer".into()))
 }
 
+/// 将 0..1 的浮点值钳制到字节。
 fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// RGB 转 HSV（各分量在 0..1）。
 fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     let r = r.clamp(0.0, 1.0);
     let g = g.clamp(0.0, 1.0);
@@ -267,6 +289,7 @@ fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     (h, s, max)
 }
 
+/// HSV 转 RGB（各分量在 0..1）。
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     let h = h.rem_euclid(360.0);
     let s = s.clamp(0.0, 4.0);
@@ -294,6 +317,7 @@ mod tests {
 
     use super::*;
 
+    /// 验证基础调节保持尺寸与缓冲长度。
     #[test]
     fn basic_adjust_keeps_shape() {
         let input = ImageFrame::new(2, 1, vec![10, 20, 30, 200, 100, 50]).expect("valid frame");
@@ -304,6 +328,7 @@ mod tests {
         assert_eq!(out.data.len(), input.data.len());
     }
 
+    /// 0..1 归一化下的 NCHW 往返转换。
     #[test]
     fn nchw_roundtrip_zero_one() {
         let input = ImageFrame::new(2, 1, vec![0, 128, 255, 255, 64, 0]).expect("valid frame");
@@ -312,6 +337,7 @@ mod tests {
         assert_eq!(out.data, input.data);
     }
 
+    /// -1..1 归一化下的 NCHW 往返转换。
     #[test]
     fn nchw_roundtrip_minus_one_one() {
         let input = ImageFrame::new(1, 1, vec![32, 128, 224]).expect("valid frame");
@@ -320,6 +346,7 @@ mod tests {
         assert_eq!(out.data, input.data);
     }
 
+    /// 0..255 归一化下的 NCHW 往返转换。
     #[test]
     fn nchw_roundtrip_zero_two_fifty_five() {
         let input = ImageFrame::new(1, 2, vec![12, 34, 56, 200, 150, 100]).expect("valid frame");
@@ -334,6 +361,7 @@ mod tests {
         assert_eq!(out.data, input.data);
     }
 
+    /// 验证缩放策略会缩小并对齐倍数。
     #[test]
     fn fit_within_max_and_multiple_scales_down() {
         let (w, h) = fit_within_max_and_multiple(1920, 1080, 800, 8);
