@@ -4,6 +4,7 @@ Rust 照片处理库（MVP）
 
 当前已实现：
 - 基础调色：曝光、亮度、对比度、饱和度、色温、色调（Hue）、Tint
+- Recipe 驱动调色接口（JSON）：全局参数、Tone Curve、HSL 分区、局部 Mask Layer
 - 可组合 Pipeline API
 - ONNX 统一抽象层（`OnnxEngine`）
 - 双后端实现：`tract` 与 `ort`（均通过 feature 开关）
@@ -52,6 +53,102 @@ cargo run -p photo-cli -- \
   --contrast 1.1 \
   --saturation 1.2
 ```
+
+导出 recipe 模板：
+
+```bash
+cargo run -p photo-cli -- --dump-recipe-template
+```
+
+使用 recipe 驱动调色：
+
+```bash
+cargo run -p photo-cli -- \
+  --input input.jpg \
+  --output output.jpg \
+  --recipe recipe.json
+```
+
+`recipe.json` 示例：
+
+```json
+{
+  "version": 1,
+  "intent": "bright travel photo",
+  "global": {
+    "exposure": 0.15,
+    "contrast": 0.08,
+    "saturation": 0.05,
+    "vibrance": 0.12,
+    "highlights": -0.15,
+    "shadows": 0.18,
+    "temperature": 0.03
+  },
+  "tone_curve": {
+    "points": [[0.0, 0.0], [0.25, 0.22], [0.5, 0.54], [0.75, 0.82], [1.0, 1.0]]
+  },
+  "hsl": {
+    "blue": { "saturation": 0.15, "luminance": -0.08 },
+    "orange": { "luminance": 0.05 }
+  }
+}
+```
+
+局部 mask recipe 示例：
+
+```json
+{
+  "version": 1,
+  "global": {
+    "exposure": 0.1,
+    "shadows": 0.12,
+    "vibrance": 0.08
+  },
+  "local_adjustments": [
+    {
+      "name": "subject lift",
+      "opacity": 0.75,
+      "mask": {
+        "kind": "radial",
+        "center_x": 0.52,
+        "center_y": 0.46,
+        "radius_x": 0.24,
+        "radius_y": 0.32,
+        "feather": 0.35
+      },
+      "global": {
+        "exposure": 0.18,
+        "shadows": 0.15,
+        "highlights": -0.05
+      }
+    },
+    {
+      "name": "sky recovery",
+      "opacity": 0.7,
+      "mask": {
+        "kind": "luminance_range",
+        "min": 0.65,
+        "max": 1.0,
+        "feather": 0.1
+      },
+      "global": {
+        "highlights": -0.22,
+        "whites": -0.12
+      },
+      "hsl": {
+        "blue": { "saturation": 0.12, "luminance": -0.05 }
+      }
+    }
+  ]
+}
+```
+
+当前支持的局部 mask：
+- `full`
+- `radial`
+- `linear_gradient`
+- `rectangle`
+- `luminance_range`
 
 基础调色 + 风格迁移（tract）：
 
