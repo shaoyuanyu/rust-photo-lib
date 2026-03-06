@@ -3,6 +3,13 @@ use std::path::Path;
 use image::{ImageBuffer, Rgb, RgbImage};
 use photo_core::{BasicAdjustments, ImageFrame, PhotoError, Result, Stage};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorNormalization {
+    ZeroOne,
+    MinusOneOne,
+    ZeroTwoFiftyFive,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct BasicAdjustStage {
     pub params: BasicAdjustments,
@@ -41,6 +48,33 @@ pub fn resize_rgb(frame: &ImageFrame, target_width: u32, target_height: u32) -> 
         image::imageops::FilterType::Triangle,
     );
     ImageFrame::new(target_width, target_height, resized.into_raw())
+}
+
+pub fn fit_within_max_and_multiple(
+    width: u32,
+    height: u32,
+    max_dim: u32,
+    multiple: u32,
+) -> (u32, u32) {
+    let mut target_w = width;
+    let mut target_h = height;
+
+    if max_dim > 0 && (target_w > max_dim || target_h > max_dim) {
+        let ratio = max_dim as f32 / target_w.max(target_h) as f32;
+        target_w = (target_w as f32 * ratio).floor() as u32;
+        target_h = (target_h as f32 * ratio).floor() as u32;
+    }
+
+    if multiple > 1 {
+        let snap = |value: u32| {
+            let snapped = (value / multiple) * multiple;
+            if snapped == 0 { multiple } else { snapped }
+        };
+        target_w = snap(target_w);
+        target_h = snap(target_h);
+    }
+
+    (target_w.max(1), target_h.max(1))
 }
 
 pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> Result<ImageFrame> {
@@ -88,6 +122,18 @@ pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> R
 }
 
 pub fn image_to_nchw_f32(frame: &ImageFrame, normalize_minus1_1: bool) -> Vec<f32> {
+    let normalization = if normalize_minus1_1 {
+        TensorNormalization::MinusOneOne
+    } else {
+        TensorNormalization::ZeroOne
+    };
+    image_to_nchw_f32_with_normalization(frame, normalization)
+}
+
+pub fn image_to_nchw_f32_with_normalization(
+    frame: &ImageFrame,
+    normalization: TensorNormalization,
+) -> Vec<f32> {
     let width = frame.width as usize;
     let height = frame.height as usize;
     let plane = width * height;
@@ -98,14 +144,22 @@ pub fn image_to_nchw_f32(frame: &ImageFrame, normalize_minus1_1: bool) -> Vec<f3
             let pixel_index = (y * width + x) * 3;
             let idx = y * width + x;
 
-            let mut r = frame.data[pixel_index] as f32 / 255.0;
-            let mut g = frame.data[pixel_index + 1] as f32 / 255.0;
-            let mut b = frame.data[pixel_index + 2] as f32 / 255.0;
+            let mut r = frame.data[pixel_index] as f32;
+            let mut g = frame.data[pixel_index + 1] as f32;
+            let mut b = frame.data[pixel_index + 2] as f32;
 
-            if normalize_minus1_1 {
-                r = r * 2.0 - 1.0;
-                g = g * 2.0 - 1.0;
-                b = b * 2.0 - 1.0;
+            match normalization {
+                TensorNormalization::ZeroOne => {
+                    r /= 255.0;
+                    g /= 255.0;
+                    b /= 255.0;
+                }
+                TensorNormalization::MinusOneOne => {
+                    r = (r / 255.0) * 2.0 - 1.0;
+                    g = (g / 255.0) * 2.0 - 1.0;
+                    b = (b / 255.0) * 2.0 - 1.0;
+                }
+                TensorNormalization::ZeroTwoFiftyFive => {}
             }
 
             out[idx] = r;
@@ -122,6 +176,20 @@ pub fn nchw_f32_to_image(
     height: u32,
     data: &[f32],
     denormalize_minus1_1: bool,
+) -> Result<ImageFrame> {
+    let normalization = if denormalize_minus1_1 {
+        TensorNormalization::MinusOneOne
+    } else {
+        TensorNormalization::ZeroOne
+    };
+    nchw_f32_to_image_with_normalization(width, height, data, normalization)
+}
+
+pub fn nchw_f32_to_image_with_normalization(
+    width: u32,
+    height: u32,
+    data: &[f32],
+    normalization: TensorNormalization,
 ) -> Result<ImageFrame> {
     let width = width as usize;
     let height = height as usize;
@@ -140,19 +208,27 @@ pub fn nchw_f32_to_image(
             let idx = y * width + x;
             let pixel = idx * 3;
 
-            let mut r = data[idx];
-            let mut g = data[plane + idx];
-            let mut b = data[plane * 2 + idx];
+            let r = data[idx];
+            let g = data[plane + idx];
+            let b = data[plane * 2 + idx];
 
-            if denormalize_minus1_1 {
-                r = (r + 1.0) * 0.5;
-                g = (g + 1.0) * 0.5;
-                b = (b + 1.0) * 0.5;
+            match normalization {
+                TensorNormalization::ZeroOne => {
+                    out[pixel] = to_u8(r);
+                    out[pixel + 1] = to_u8(g);
+                    out[pixel + 2] = to_u8(b);
+                }
+                TensorNormalization::MinusOneOne => {
+                    out[pixel] = to_u8((r + 1.0) * 0.5);
+                    out[pixel + 1] = to_u8((g + 1.0) * 0.5);
+                    out[pixel + 2] = to_u8((b + 1.0) * 0.5);
+                }
+                TensorNormalization::ZeroTwoFiftyFive => {
+                    out[pixel] = r.clamp(0.0, 255.0).round() as u8;
+                    out[pixel + 1] = g.clamp(0.0, 255.0).round() as u8;
+                    out[pixel + 2] = b.clamp(0.0, 255.0).round() as u8;
+                }
             }
-
-            out[pixel] = to_u8(r);
-            out[pixel + 1] = to_u8(g);
-            out[pixel + 2] = to_u8(b);
         }
     }
 
@@ -242,5 +318,25 @@ mod tests {
         let tensor = image_to_nchw_f32(&input, true);
         let out = nchw_f32_to_image(1, 1, &tensor, true).expect("roundtrip ok");
         assert_eq!(out.data, input.data);
+    }
+
+    #[test]
+    fn nchw_roundtrip_zero_two_fifty_five() {
+        let input = ImageFrame::new(1, 2, vec![12, 34, 56, 200, 150, 100]).expect("valid frame");
+        let tensor = image_to_nchw_f32_with_normalization(&input, TensorNormalization::ZeroTwoFiftyFive);
+        let out = nchw_f32_to_image_with_normalization(
+            1,
+            2,
+            &tensor,
+            TensorNormalization::ZeroTwoFiftyFive,
+        )
+        .expect("roundtrip ok");
+        assert_eq!(out.data, input.data);
+    }
+
+    #[test]
+    fn fit_within_max_and_multiple_scales_down() {
+        let (w, h) = fit_within_max_and_multiple(1920, 1080, 800, 8);
+        assert_eq!((w, h), (800, 448));
     }
 }

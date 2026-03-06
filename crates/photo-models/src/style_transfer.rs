@@ -1,18 +1,43 @@
 use std::path::{Path, PathBuf};
 
 use photo_core::{ImageFrame, PhotoError, Result};
-use photo_imageops::{image_to_nchw_f32, nchw_f32_to_image, resize_rgb};
+use photo_imageops::{
+    TensorNormalization, fit_within_max_and_multiple, image_to_nchw_f32_with_normalization,
+    nchw_f32_to_image_with_normalization, resize_rgb,
+};
 use photo_onnx::{NamedTensor, OnnxEngine, SessionOptions};
 
 #[derive(Debug, Clone, Copy)]
 pub enum StyleTransferNormalization {
     ZeroOne,
     MinusOneOne,
+    ZeroTwoFiftyFive,
 }
 
 impl StyleTransferNormalization {
-    fn is_minus1_1(self) -> bool {
-        matches!(self, Self::MinusOneOne)
+    fn as_tensor_normalization(self) -> TensorNormalization {
+        match self {
+            Self::ZeroOne => TensorNormalization::ZeroOne,
+            Self::MinusOneOne => TensorNormalization::MinusOneOne,
+            Self::ZeroTwoFiftyFive => TensorNormalization::ZeroTwoFiftyFive,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum StyleTransferResizePolicy {
+    Original,
+    MaxDimensionMultiple { max_dim: u32, multiple: u32 },
+}
+
+impl StyleTransferResizePolicy {
+    fn target_size(self, source_width: u32, source_height: u32) -> (u32, u32) {
+        match self {
+            Self::Original => (source_width, source_height),
+            Self::MaxDimensionMultiple { max_dim, multiple } => {
+                fit_within_max_and_multiple(source_width, source_height, max_dim, multiple)
+            }
+        }
     }
 }
 
@@ -22,6 +47,7 @@ pub struct StyleTransferModel {
     pub input_name: String,
     pub output_name: Option<String>,
     pub input_size: Option<(u32, u32)>,
+    pub resize_policy: StyleTransferResizePolicy,
     pub normalization: StyleTransferNormalization,
 }
 
@@ -29,15 +55,23 @@ impl StyleTransferModel {
     pub fn new<P: AsRef<Path>>(model_path: P) -> Self {
         Self {
             model_path: model_path.as_ref().to_path_buf(),
-            input_name: "input".to_string(),
+            input_name: "input1".to_string(),
             output_name: None,
             input_size: None,
-            normalization: StyleTransferNormalization::MinusOneOne,
+            resize_policy: StyleTransferResizePolicy::MaxDimensionMultiple {
+                max_dim: 800,
+                multiple: 8,
+            },
+            normalization: StyleTransferNormalization::ZeroTwoFiftyFive,
         }
     }
 
     pub fn run<E: OnnxEngine>(&self, engine: &mut E, image: &ImageFrame) -> Result<ImageFrame> {
-        let (target_w, target_h) = self.input_size.unwrap_or((image.width, image.height));
+        let (target_w, target_h) = if let Some(input_size) = self.input_size {
+            input_size
+        } else {
+            self.resize_policy.target_size(image.width, image.height)
+        };
         let resized = if target_w != image.width || target_h != image.height {
             resize_rgb(image, target_w, target_h)?
         } else {
@@ -48,16 +82,41 @@ impl StyleTransferModel {
             .load_model(&self.model_path, SessionOptions::default())
             .map_err(|e| PhotoError::Model(e.to_string()))?;
 
-        let tensor_data = image_to_nchw_f32(&resized, self.normalization.is_minus1_1());
-        let input = NamedTensor {
-            name: self.input_name.clone(),
-            shape: vec![1, 3, target_h as usize, target_w as usize],
-            data: tensor_data,
-        };
+        let tensor_data = image_to_nchw_f32_with_normalization(
+            &resized,
+            self.normalization.as_tensor_normalization(),
+        );
+        let input_shape = vec![1, 3, target_h as usize, target_w as usize];
 
-        let outputs = engine
-            .run(&[input])
-            .map_err(|e| PhotoError::Model(e.to_string()))?;
+        let mut last_err = None;
+        let mut outputs = None;
+        for input_name in self.input_name_candidates() {
+            let input = NamedTensor {
+                name: input_name,
+                shape: input_shape.clone(),
+                data: tensor_data.clone(),
+            };
+
+            match engine.run(&[input]) {
+                Ok(v) => {
+                    outputs = Some(v);
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                }
+            }
+        }
+
+        let outputs = outputs.ok_or_else(|| {
+            let err_message = last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown inference error".to_string());
+            PhotoError::Model(format!(
+                "failed to run style transfer with candidate inputs {:?}: {err_message}",
+                self.input_name_candidates()
+            ))
+        })?;
 
         let output = if let Some(name) = &self.output_name {
             outputs
@@ -81,14 +140,31 @@ impl StyleTransferModel {
 
         let out_h = output.shape[2] as u32;
         let out_w = output.shape[3] as u32;
-        let out_img =
-            nchw_f32_to_image(out_w, out_h, &output.data, self.normalization.is_minus1_1())?;
+        let out_img = nchw_f32_to_image_with_normalization(
+            out_w,
+            out_h,
+            &output.data,
+            self.normalization.as_tensor_normalization(),
+        )?;
 
         if out_w != image.width || out_h != image.height {
             resize_rgb(&out_img, image.width, image.height)
         } else {
             Ok(out_img)
         }
+    }
+
+    fn input_name_candidates(&self) -> Vec<String> {
+        const FALLBACKS: &[&str] = &["input1", "input", "image", "x"];
+
+        let mut candidates = Vec::with_capacity(FALLBACKS.len() + 1);
+        candidates.push(self.input_name.clone());
+        for fallback in FALLBACKS {
+            if !candidates.iter().any(|existing| existing == fallback) {
+                candidates.push((*fallback).to_string());
+            }
+        }
+        candidates
     }
 }
 
@@ -101,8 +177,11 @@ mod tests {
     use super::*;
 
     struct MockEngine {
+        accepted_input_name: Option<String>,
         output_shape: Vec<usize>,
         output_data: Vec<f32>,
+        seen_input_names: Vec<String>,
+        seen_input_shape: Option<Vec<usize>>,
     }
 
     impl OnnxEngine for MockEngine {
@@ -118,7 +197,23 @@ mod tests {
             Ok(())
         }
 
-        fn run(&mut self, _inputs: &[NamedTensor]) -> OnnxResult<Vec<NamedTensor>> {
+        fn run(&mut self, inputs: &[NamedTensor]) -> OnnxResult<Vec<NamedTensor>> {
+            let input = inputs
+                .first()
+                .ok_or_else(|| OnnxError::InvalidTensor("inputs must not be empty".into()))?;
+
+            self.seen_input_names.push(input.name.clone());
+            self.seen_input_shape = Some(input.shape.clone());
+
+            if let Some(accepted_input_name) = &self.accepted_input_name {
+                if &input.name != accepted_input_name {
+                    return Err(OnnxError::Inference(format!(
+                        "unexpected input name: {}",
+                        input.name
+                    )));
+                }
+            }
+
             Ok(vec![NamedTensor {
                 name: "output_0".to_string(),
                 shape: self.output_shape.clone(),
@@ -137,16 +232,20 @@ mod tests {
         .expect("valid frame");
 
         let mut engine = MockEngine {
+            accepted_input_name: None,
             output_shape: vec![1, 3, 2, 2],
             output_data: vec![
                 0.0, 0.2, 0.4, 0.6, // R
                 0.1, 0.3, 0.5, 0.7, // G
                 0.2, 0.4, 0.6, 0.8, // B
             ],
+            seen_input_names: vec![],
+            seen_input_shape: None,
         };
 
         let mut model = StyleTransferModel::new("dummy.onnx");
         model.normalization = StyleTransferNormalization::ZeroOne;
+        model.resize_policy = StyleTransferResizePolicy::Original;
 
         let output = model.run(&mut engine, &input).expect("run ok");
         assert_eq!(output.width, 2);
@@ -158,8 +257,11 @@ mod tests {
     fn style_transfer_rejects_invalid_shape() {
         let input = ImageFrame::new(1, 1, vec![10, 20, 30]).expect("valid frame");
         let mut engine = MockEngine {
+            accepted_input_name: None,
             output_shape: vec![1, 1, 1, 1],
             output_data: vec![0.0],
+            seen_input_names: vec![],
+            seen_input_shape: None,
         };
 
         let model = StyleTransferModel::new("dummy.onnx");
@@ -170,5 +272,61 @@ mod tests {
             PhotoError::Model(_) => {}
             _ => panic!("expected model error"),
         }
+    }
+
+    #[test]
+    fn style_transfer_defaults_match_legacy_project_behavior() {
+        let model = StyleTransferModel::new("dummy.onnx");
+        assert_eq!(model.input_name, "input1");
+        assert!(matches!(
+            model.resize_policy,
+            StyleTransferResizePolicy::MaxDimensionMultiple {
+                max_dim: 800,
+                multiple: 8
+            }
+        ));
+        assert!(matches!(
+            model.normalization,
+            StyleTransferNormalization::ZeroTwoFiftyFive
+        ));
+    }
+
+    #[test]
+    fn style_transfer_retries_input_name_candidates() {
+        let input = ImageFrame::new(1, 1, vec![10, 20, 30]).expect("valid frame");
+        let mut engine = MockEngine {
+            accepted_input_name: Some("input1".to_string()),
+            output_shape: vec![1, 3, 1, 1],
+            output_data: vec![10.0, 20.0, 30.0],
+            seen_input_names: vec![],
+            seen_input_shape: None,
+        };
+
+        let mut model = StyleTransferModel::new("dummy.onnx");
+        model.input_name = "input".to_string();
+        model.resize_policy = StyleTransferResizePolicy::Original;
+
+        let output = model.run(&mut engine, &input).expect("run ok");
+        assert_eq!(output.data, vec![10, 20, 30]);
+        assert_eq!(engine.seen_input_names, vec!["input", "input1"]);
+    }
+
+    #[test]
+    fn style_transfer_uses_default_max_dim_multiple_resize() {
+        let input = ImageFrame::new(1600, 900, vec![128; 1600 * 900 * 3]).expect("valid frame");
+        let mut engine = MockEngine {
+            accepted_input_name: None,
+            output_shape: vec![1, 3, 448, 800],
+            output_data: vec![128.0; 448 * 800 * 3],
+            seen_input_names: vec![],
+            seen_input_shape: None,
+        };
+
+        let model = StyleTransferModel::new("dummy.onnx");
+        let output = model.run(&mut engine, &input).expect("run ok");
+
+        assert_eq!(output.width, 1600);
+        assert_eq!(output.height, 900);
+        assert_eq!(engine.seen_input_shape, Some(vec![1, 3, 448, 800]));
     }
 }

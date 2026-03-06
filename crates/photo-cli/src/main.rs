@@ -32,7 +32,7 @@ struct Cli {
 
     #[arg(long)]
     style_model: Option<PathBuf>,
-    #[arg(long, value_enum, default_value_t = Backend::Tract)]
+    #[arg(long, value_enum, default_value_t = Backend::Ort)]
     backend: Backend,
 }
 

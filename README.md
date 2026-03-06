@@ -69,6 +69,15 @@ cargo run -p photo-cli --features tract-backend -- \
 cargo run -p photo-cli --features ort-backend -- \
   --input input.jpg \
   --output stylized.jpg \
+  --style-model style.onnx
+```
+
+显式指定后端（可选）：
+
+```bash
+cargo run -p photo-cli --features ort-backend -- \
+  --input input.jpg \
+  --output stylized.jpg \
   --style-model style.onnx \
   --backend ort
 ```
@@ -99,5 +108,8 @@ cargo check -p photo-cli --features ort-backend
 ## 说明
 
 - 当前模型适配默认输出形状为 `[1, 3, H, W]`。
-- 风格迁移默认使用 `[-1, 1]` 归一化策略，可在 `photo-models` 内扩展。
-- 下一步建议：增加黄金图测试、后端一致性测试、模型参数配置文件化。
+- 风格迁移默认使用 `[0,255]` 像素值语义（与 `rust-style-transfer` 对齐）。
+- 风格迁移默认将输入缩放到 `max_dim=800` 且边长对齐到 `8` 的倍数，再在输出端恢复到原图尺寸。
+- 输入节点名默认 `input1`，并内置 `input1/input/image/x` 回退尝试。
+- CLI 在启用风格迁移时默认后端为 `ort`。
+- `tract` 后端目前对 fast-neural-style 常见 ONNX（如 `*-9.onnx`）中的 `Upsample` 支持有限，可能无法运行；推荐优先使用 `ort`。

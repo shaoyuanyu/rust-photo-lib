@@ -1,3 +1,5 @@
 mod style_transfer;
 
-pub use style_transfer::{StyleTransferModel, StyleTransferNormalization};
+pub use style_transfer::{
+	StyleTransferModel, StyleTransferNormalization, StyleTransferResizePolicy,
+};

@@ -9,5 +9,5 @@ backend = ["dep:ort", "dep:ndarray"]
 
 [dependencies]
 ndarray = { workspace = true, optional = true }
-ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray", "load-dynamic"], optional = true }
+ort = { version = "=2.0.0-rc.10", features = ["ndarray"], optional = true }
 photo-onnx = { path = "../photo-onnx" }
