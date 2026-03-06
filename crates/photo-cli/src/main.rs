@@ -1,19 +1,18 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use photo_core::ImageFrame;
-use photo_core::{BasicAdjustments, Pipeline};
-use photo_imageops::{BasicAdjustStage, load_image, save_image};
+use photo_core::{GlobalAdjustments, ImageFrame, PhotoEditRecipe, Pipeline};
+use photo_imageops::{PhotoEditStage, load_image, save_image};
 use photo_models::StyleTransferModel;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Rust photo processing CLI")]
 struct Cli {
-    #[arg(long)]
-    input: PathBuf,
-    #[arg(long)]
-    output: PathBuf,
+    #[arg(long, required_unless_present = "dump_recipe_template")]
+    input: Option<PathBuf>,
+    #[arg(long, required_unless_present = "dump_recipe_template")]
+    output: Option<PathBuf>,
 
     #[arg(long, default_value_t = 0.0)]
     exposure: f32,
@@ -31,6 +30,11 @@ struct Cli {
     hue_shift_degrees: f32,
 
     #[arg(long)]
+    recipe: Option<PathBuf>,
+    #[arg(long)]
+    dump_recipe_template: bool,
+
+    #[arg(long)]
     style_model: Option<PathBuf>,
     #[arg(long, value_enum, default_value_t = Backend::Ort)]
     backend: Backend,
@@ -44,21 +48,29 @@ enum Backend {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.dump_recipe_template {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&PhotoEditRecipe::template())
+                .context("failed to serialize recipe template")?
+        );
+        return Ok(());
+    }
 
-    let mut image = load_image(&cli.input).map_err(anyhow::Error::msg)?;
+    let input_path = cli
+        .input
+        .clone()
+        .context("`--input` is required unless `--dump-recipe-template` is used")?;
+    let output_path = cli
+        .output
+        .clone()
+        .context("`--output` is required unless `--dump-recipe-template` is used")?;
+    let recipe = load_effective_recipe(&cli)?;
+
+    let mut image = load_image(&input_path).map_err(anyhow::Error::msg)?;
 
     let mut pipeline = Pipeline::new();
-    pipeline.push(BasicAdjustStage {
-        params: BasicAdjustments {
-            exposure: cli.exposure,
-            brightness: cli.brightness,
-            contrast: cli.contrast,
-            saturation: cli.saturation,
-            temperature: cli.temperature,
-            tint: cli.tint,
-            hue_shift_degrees: cli.hue_shift_degrees,
-        },
-    });
+    pipeline.push(PhotoEditStage { recipe });
 
     image = pipeline.run(image).map_err(anyhow::Error::msg)?;
 
@@ -67,11 +79,41 @@ fn main() -> Result<()> {
         image = apply_style_transfer(cli.backend, &model, &image)?;
     }
 
-    save_image(&image, &cli.output)
+    save_image(&image, &output_path)
         .map_err(anyhow::Error::msg)
-        .with_context(|| format!("failed to save image to {}", cli.output.display()))?;
+        .with_context(|| format!("failed to save image to {}", output_path.display()))?;
 
     Ok(())
+}
+
+fn load_effective_recipe(cli: &Cli) -> Result<PhotoEditRecipe> {
+    let mut recipe = if let Some(path) = &cli.recipe {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read recipe file {}", path.display()))?;
+        serde_json::from_str::<PhotoEditRecipe>(&raw)
+            .with_context(|| format!("failed to parse recipe file {}", path.display()))?
+    } else {
+        PhotoEditRecipe::default()
+    };
+
+    apply_cli_global_overrides(&mut recipe.global, cli);
+    Ok(recipe)
+}
+
+fn apply_cli_global_overrides(global: &mut GlobalAdjustments, cli: &Cli) {
+    set_if_non_default(&mut global.exposure, cli.exposure, 0.0);
+    set_if_non_default(&mut global.brightness, cli.brightness, 0.0);
+    set_if_non_default(&mut global.contrast, cli.contrast - 1.0, 0.0);
+    set_if_non_default(&mut global.saturation, cli.saturation - 1.0, 0.0);
+    set_if_non_default(&mut global.temperature, cli.temperature, 0.0);
+    set_if_non_default(&mut global.tint, cli.tint, 0.0);
+    set_if_non_default(&mut global.hue_shift_degrees, cli.hue_shift_degrees, 0.0);
+}
+
+fn set_if_non_default(target: &mut f32, candidate: f32, default: f32) {
+    if (candidate - default).abs() > f32::EPSILON {
+        *target = candidate;
+    }
 }
 
 fn apply_style_transfer(

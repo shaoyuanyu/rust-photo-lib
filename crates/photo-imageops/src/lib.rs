@@ -1,7 +1,10 @@
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use image::{ImageBuffer, Rgb, RgbImage};
-use photo_core::{BasicAdjustments, ImageFrame, PhotoError, Result, Stage};
+use photo_core::{
+    BasicAdjustments, GlobalAdjustments, HslAdjustment, HslColor, ImageFrame, LocalAdjustmentLayer,
+    MaskShape, PhotoEditRecipe, PhotoError, Result, Stage, ToneCurve,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorNormalization {
@@ -15,6 +18,11 @@ pub struct BasicAdjustStage {
     pub params: BasicAdjustments,
 }
 
+#[derive(Debug, Clone)]
+pub struct PhotoEditStage {
+    pub recipe: PhotoEditRecipe,
+}
+
 impl Stage for BasicAdjustStage {
     fn name(&self) -> &'static str {
         "basic-adjust"
@@ -22,6 +30,16 @@ impl Stage for BasicAdjustStage {
 
     fn apply(&self, input: ImageFrame) -> Result<ImageFrame> {
         apply_basic_adjustments(input, self.params)
+    }
+}
+
+impl Stage for PhotoEditStage {
+    fn name(&self) -> &'static str {
+        "photo-edit"
+    }
+
+    fn apply(&self, input: ImageFrame) -> Result<ImageFrame> {
+        apply_photo_edit_recipe(input, &self.recipe)
     }
 }
 
@@ -78,8 +96,58 @@ pub fn fit_within_max_and_multiple(
 }
 
 pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> Result<ImageFrame> {
+    apply_global_adjustments(
+        input,
+        GlobalAdjustments {
+            exposure: params.exposure,
+            brightness: params.brightness,
+            contrast: params.contrast - 1.0,
+            saturation: params.saturation - 1.0,
+            temperature: params.temperature,
+            tint: params.tint,
+            hue_shift_degrees: params.hue_shift_degrees,
+            ..GlobalAdjustments::default()
+        },
+    )
+}
+
+pub fn apply_photo_edit_recipe(input: ImageFrame, recipe: &PhotoEditRecipe) -> Result<ImageFrame> {
+    let mut frame = apply_edit_stack(
+        input,
+        recipe.global,
+        recipe.tone_curve.as_ref(),
+        &recipe.hsl,
+    )?;
+    for layer in &recipe.local_adjustments {
+        frame = apply_local_adjustment_layer(frame, layer)?;
+    }
+    Ok(frame)
+}
+
+fn apply_edit_stack(
+    input: ImageFrame,
+    global: GlobalAdjustments,
+    tone_curve: Option<&ToneCurve>,
+    hsl: &BTreeMap<HslColor, HslAdjustment>,
+) -> Result<ImageFrame> {
+    let mut frame = apply_global_adjustments(input, global)?;
+    if let Some(curve) = tone_curve {
+        frame = apply_tone_curve(frame, curve)?;
+    }
+    if !hsl.is_empty() {
+        frame = apply_hsl_adjustments(frame, hsl)?;
+    }
+    Ok(frame)
+}
+
+pub fn apply_global_adjustments(
+    input: ImageFrame,
+    params: GlobalAdjustments,
+) -> Result<ImageFrame> {
     let mut out = input.data.clone();
     let exposure_mul = 2.0f32.powf(params.exposure);
+    let contrast_mul = (1.0 + params.contrast).max(0.0);
+    let saturation_mul = (1.0 + params.saturation).max(0.0);
 
     for chunk in out.chunks_exact_mut(3) {
         let mut r = chunk[0] as f32 / 255.0;
@@ -94,15 +162,13 @@ pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> R
         g += params.brightness;
         b += params.brightness;
 
-        r = ((r - 0.5) * params.contrast) + 0.5;
-        g = ((g - 0.5) * params.contrast) + 0.5;
-        b = ((b - 0.5) * params.contrast) + 0.5;
-
         r += params.temperature * 0.08;
         b -= params.temperature * 0.08;
         g += params.tint * 0.05;
 
-        let (mut h, mut s, v) = rgb_to_hsv(r, g, b);
+        let (mut h, mut s, mut v) = rgb_to_hsv(r, g, b);
+        let luma = rgb_luma(r, g, b);
+        v = apply_tone_controls(v, luma, params, contrast_mul);
         h += params.hue_shift_degrees;
         if h < 0.0 {
             h += 360.0;
@@ -110,7 +176,8 @@ pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> R
         if h >= 360.0 {
             h -= 360.0;
         }
-        s *= params.saturation;
+        s *= saturation_mul;
+        s = apply_vibrance(s, params.vibrance, h, v);
         let (nr, ng, nb) = hsv_to_rgb(h, s, v);
 
         chunk[0] = to_u8(nr);
@@ -119,6 +186,66 @@ pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> R
     }
 
     ImageFrame::new(input.width, input.height, out)
+}
+
+pub fn apply_tone_curve(input: ImageFrame, curve: &ToneCurve) -> Result<ImageFrame> {
+    let curve_points = prepare_curve_points(curve);
+    let mut out = input.data.clone();
+
+    for value in &mut out {
+        let normalized = *value as f32 / 255.0;
+        *value = to_u8(evaluate_curve(&curve_points, normalized));
+    }
+
+    ImageFrame::new(input.width, input.height, out)
+}
+
+pub fn apply_hsl_adjustments(
+    input: ImageFrame,
+    adjustments: &BTreeMap<HslColor, HslAdjustment>,
+) -> Result<ImageFrame> {
+    let mut out = input.data.clone();
+
+    for chunk in out.chunks_exact_mut(3) {
+        let r = chunk[0] as f32 / 255.0;
+        let g = chunk[1] as f32 / 255.0;
+        let b = chunk[2] as f32 / 255.0;
+        let (mut h, mut s, mut v) = rgb_to_hsv(r, g, b);
+
+        let mut hue_delta = 0.0;
+        let mut saturation_delta = 0.0;
+        let mut luminance_delta = 0.0;
+        for (color, adjustment) in adjustments {
+            let weight = hue_weight(h, hsl_color_center(*color), 60.0);
+            hue_delta += adjustment.hue * 45.0 * weight;
+            saturation_delta += adjustment.saturation * weight;
+            luminance_delta += adjustment.luminance * 0.5 * weight;
+        }
+
+        h += hue_delta;
+        s *= (1.0 + saturation_delta).max(0.0);
+        v = (v + luminance_delta).clamp(0.0, 1.0);
+
+        let (nr, ng, nb) = hsv_to_rgb(h, s, v);
+        chunk[0] = to_u8(nr);
+        chunk[1] = to_u8(ng);
+        chunk[2] = to_u8(nb);
+    }
+
+    ImageFrame::new(input.width, input.height, out)
+}
+
+pub fn apply_local_adjustment_layer(
+    input: ImageFrame,
+    layer: &LocalAdjustmentLayer,
+) -> Result<ImageFrame> {
+    let edited = apply_edit_stack(
+        input.clone(),
+        layer.global,
+        layer.tone_curve.as_ref(),
+        &layer.hsl,
+    )?;
+    blend_with_mask(&input, &edited, &layer.mask, layer.opacity)
 }
 
 pub fn image_to_nchw_f32(frame: &ImageFrame, normalize_minus1_1: bool) -> Vec<f32> {
@@ -240,6 +367,336 @@ fn frame_to_rgb_image(frame: &ImageFrame) -> Result<RgbImage> {
         .ok_or_else(|| PhotoError::InvalidImageData("failed to create image buffer".into()))
 }
 
+fn apply_tone_controls(value: f32, luma: f32, params: GlobalAdjustments, contrast_mul: f32) -> f32 {
+    let with_tonal = (value + tonal_region_delta(params, luma)).clamp(0.0, 1.0);
+    apply_contrast(with_tonal, contrast_mul)
+}
+
+fn tonal_region_delta(params: GlobalAdjustments, luma: f32) -> f32 {
+    let shadows = shadow_mask(luma);
+    let highlights = highlight_mask(luma);
+    let blacks = black_mask(luma);
+    let whites = white_mask(luma);
+
+    tone_zone_delta(luma, params.shadows, shadows, 0.85)
+        + tone_zone_delta(luma, params.highlights, highlights, 0.65)
+        + tone_zone_delta(luma, params.blacks, blacks, 0.75)
+        + tone_zone_delta(luma, params.whites, whites, 0.55)
+}
+
+fn tone_zone_delta(luma: f32, amount: f32, mask: f32, strength: f32) -> f32 {
+    let amount = amount.clamp(-1.0, 1.0);
+    if amount >= 0.0 {
+        amount * mask * (1.0 - luma) * strength
+    } else {
+        amount * mask * (0.25 + luma * 0.75) * strength
+    }
+}
+
+fn apply_contrast(value: f32, contrast_mul: f32) -> f32 {
+    ((value - 0.5) * contrast_mul + 0.5).clamp(0.0, 1.0)
+}
+
+fn shadow_mask(luma: f32) -> f32 {
+    let luma = luma.clamp(0.0, 1.0);
+    (1.0 - smoothstep(0.18, 0.72, luma)) * (1.0 - black_mask(luma) * 0.35)
+}
+
+fn highlight_mask(luma: f32) -> f32 {
+    let luma = luma.clamp(0.0, 1.0);
+    smoothstep(0.28, 0.82, luma) * (1.0 - white_mask(luma) * 0.35)
+}
+
+fn black_mask(luma: f32) -> f32 {
+    1.0 - smoothstep(0.0, 0.28, luma)
+}
+
+fn white_mask(luma: f32) -> f32 {
+    smoothstep(0.72, 1.0, luma)
+}
+
+fn apply_vibrance(saturation: f32, vibrance: f32, hue: f32, value: f32) -> f32 {
+    let saturation = saturation.clamp(0.0, 4.0);
+    let vibrance = vibrance.clamp(-1.0, 1.0);
+    let low_sat_bias = (1.0 - saturation.clamp(0.0, 1.0)).powf(1.35);
+    let skin_protection =
+        1.0 - 0.35 * hue_weight(hue, 28.0, 55.0) * smoothstep(0.08, 0.75, saturation);
+    let highlight_protection = 1.0 - 0.20 * smoothstep(0.75, 1.0, value);
+
+    if vibrance >= 0.0 {
+        (saturation + vibrance * low_sat_bias * skin_protection * highlight_protection * 0.9)
+            .clamp(0.0, 4.0)
+    } else {
+        let negative_rolloff = 0.55 + 0.45 * (1.0 - low_sat_bias);
+        (saturation * (1.0 + vibrance * negative_rolloff)).clamp(0.0, 4.0)
+    }
+}
+
+fn blend_with_mask(
+    base: &ImageFrame,
+    edited: &ImageFrame,
+    mask: &MaskShape,
+    opacity: f32,
+) -> Result<ImageFrame> {
+    if base.width != edited.width || base.height != edited.height {
+        return Err(PhotoError::Pipeline(
+            "local adjustment layers require matching image sizes".into(),
+        ));
+    }
+
+    let opacity = opacity.clamp(0.0, 1.0);
+    let mut out = base.data.clone();
+    let width = base.width.max(1);
+    let height = base.height.max(1);
+
+    for y in 0..base.height as usize {
+        for x in 0..base.width as usize {
+            let pixel = (y * base.width as usize + x) * 3;
+            let context = PixelContext::new(base, x, y, width, height);
+            let weight = opacity * evaluate_mask(mask, &context);
+
+            out[pixel] = blend_channel(base.data[pixel], edited.data[pixel], weight);
+            out[pixel + 1] = blend_channel(base.data[pixel + 1], edited.data[pixel + 1], weight);
+            out[pixel + 2] = blend_channel(base.data[pixel + 2], edited.data[pixel + 2], weight);
+        }
+    }
+
+    ImageFrame::new(base.width, base.height, out)
+}
+
+#[derive(Clone, Copy)]
+struct PixelContext {
+    x: f32,
+    y: f32,
+    luma: f32,
+}
+
+impl PixelContext {
+    fn new(frame: &ImageFrame, x: usize, y: usize, width: u32, height: u32) -> Self {
+        let pixel = (y * frame.width as usize + x) * 3;
+        let r = frame.data[pixel] as f32 / 255.0;
+        let g = frame.data[pixel + 1] as f32 / 255.0;
+        let b = frame.data[pixel + 2] as f32 / 255.0;
+
+        Self {
+            x: (x as f32 + 0.5) / width as f32,
+            y: (y as f32 + 0.5) / height as f32,
+            luma: rgb_luma(r, g, b),
+        }
+    }
+}
+
+fn evaluate_mask(mask: &MaskShape, context: &PixelContext) -> f32 {
+    match mask {
+        MaskShape::Full => 1.0,
+        MaskShape::Radial {
+            center_x,
+            center_y,
+            radius_x,
+            radius_y,
+            feather,
+            invert,
+        } => apply_invert(
+            radial_mask(
+                context.x,
+                context.y,
+                *center_x,
+                *center_y,
+                *radius_x,
+                radius_y.unwrap_or(*radius_x),
+                *feather,
+            ),
+            *invert,
+        ),
+        MaskShape::LinearGradient {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            feather,
+            invert,
+        } => apply_invert(
+            linear_gradient_mask(
+                context.x, context.y, *start_x, *start_y, *end_x, *end_y, *feather,
+            ),
+            *invert,
+        ),
+        MaskShape::Rectangle {
+            left,
+            top,
+            right,
+            bottom,
+            feather,
+            invert,
+        } => apply_invert(
+            rectangle_mask(context.x, context.y, *left, *top, *right, *bottom, *feather),
+            *invert,
+        ),
+        MaskShape::LuminanceRange {
+            min,
+            max,
+            feather,
+            invert,
+        } => apply_invert(
+            luminance_range_mask(context.luma, *min, *max, *feather),
+            *invert,
+        ),
+    }
+}
+
+fn apply_invert(weight: f32, invert: bool) -> f32 {
+    let weight = weight.clamp(0.0, 1.0);
+    if invert { 1.0 - weight } else { weight }
+}
+
+fn radial_mask(
+    x: f32,
+    y: f32,
+    center_x: f32,
+    center_y: f32,
+    radius_x: f32,
+    radius_y: f32,
+    feather: f32,
+) -> f32 {
+    let radius_x = radius_x.abs().max(0.001);
+    let radius_y = radius_y.abs().max(0.001);
+    let distance =
+        (((x - center_x) / radius_x).powi(2) + ((y - center_y) / radius_y).powi(2)).sqrt();
+    feathered_distance(distance, feather)
+}
+
+fn rectangle_mask(
+    x: f32,
+    y: f32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    feather: f32,
+) -> f32 {
+    let feather = feather.clamp(0.0, 0.99);
+    let left = left.min(right);
+    let right = right.max(left);
+    let top = top.min(bottom);
+    let bottom = bottom.max(top);
+    let x_weight =
+        smoothstep(left - feather, left, x) * (1.0 - smoothstep(right, right + feather, x));
+    let y_weight =
+        smoothstep(top - feather, top, y) * (1.0 - smoothstep(bottom, bottom + feather, y));
+    (x_weight * y_weight).clamp(0.0, 1.0)
+}
+
+fn linear_gradient_mask(
+    x: f32,
+    y: f32,
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    feather: f32,
+) -> f32 {
+    let dx = end_x - start_x;
+    let dy = end_y - start_y;
+    let length_sq = dx * dx + dy * dy;
+    if length_sq <= f32::EPSILON {
+        return 1.0;
+    }
+
+    let t = ((x - start_x) * dx + (y - start_y) * dy) / length_sq;
+    let feather = feather.clamp(0.0, 1.0);
+    smoothstep(0.0 - feather, 1.0 + feather, t)
+}
+
+fn luminance_range_mask(luma: f32, min: f32, max: f32, feather: f32) -> f32 {
+    let feather = feather.clamp(0.0, 1.0);
+    let min = min.clamp(0.0, 1.0);
+    let max = max.clamp(min, 1.0);
+    let enter = smoothstep(min - feather, min, luma);
+    let exit = 1.0 - smoothstep(max, max + feather, luma);
+    (enter * exit).clamp(0.0, 1.0)
+}
+
+fn feathered_distance(distance: f32, feather: f32) -> f32 {
+    let feather = feather.clamp(0.0, 0.99);
+    let inner = (1.0 - feather).clamp(0.0, 1.0);
+    1.0 - smoothstep(inner, 1.0, distance)
+}
+
+fn blend_channel(base: u8, edited: u8, weight: f32) -> u8 {
+    let weight = weight.clamp(0.0, 1.0);
+    let blended = base as f32 + (edited as f32 - base as f32) * weight;
+    blended.round().clamp(0.0, 255.0) as u8
+}
+
+fn prepare_curve_points(curve: &ToneCurve) -> Vec<[f32; 2]> {
+    let mut points: Vec<[f32; 2]> = curve
+        .points
+        .iter()
+        .map(|point| [point[0].clamp(0.0, 1.0), point[1].clamp(0.0, 1.0)])
+        .collect();
+    points.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap_or(std::cmp::Ordering::Equal));
+
+    if points.is_empty() {
+        return ToneCurve::linear().points;
+    }
+    if points[0][0] > 0.0 {
+        points.insert(0, [0.0, 0.0]);
+    }
+    if points.last().is_some_and(|point| point[0] < 1.0) {
+        points.push([1.0, 1.0]);
+    }
+    points
+}
+
+fn evaluate_curve(points: &[[f32; 2]], x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+
+    for pair in points.windows(2) {
+        let start = pair[0];
+        let end = pair[1];
+        if x >= start[0] && x <= end[0] {
+            let width = (end[0] - start[0]).max(f32::EPSILON);
+            let t = (x - start[0]) / width;
+            return start[1] + (end[1] - start[1]) * t;
+        }
+    }
+
+    points.last().map(|point| point[1]).unwrap_or(x)
+}
+
+fn hsl_color_center(color: HslColor) -> f32 {
+    match color {
+        HslColor::Red => 0.0,
+        HslColor::Orange => 30.0,
+        HslColor::Yellow => 60.0,
+        HslColor::Green => 120.0,
+        HslColor::Aqua => 180.0,
+        HslColor::Blue => 240.0,
+        HslColor::Purple => 275.0,
+        HslColor::Magenta => 320.0,
+    }
+}
+
+fn hue_weight(hue: f32, center: f32, width: f32) -> f32 {
+    let distance = hue_distance(hue, center);
+    (1.0 - distance / width).clamp(0.0, 1.0)
+}
+
+fn hue_distance(a: f32, b: f32) -> f32 {
+    let delta = (a - b).rem_euclid(360.0);
+    delta.min(360.0 - delta)
+}
+
+fn rgb_luma(r: f32, g: f32, b: f32) -> f32 {
+    (0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 1.0)
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let width = (edge1 - edge0).max(f32::EPSILON);
+    let t = ((x - edge0) / width).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
@@ -290,7 +747,9 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use photo_core::BasicAdjustments;
+    use photo_core::{
+        BasicAdjustments, HslColor, LocalAdjustmentLayer, MaskShape, PhotoEditRecipe, ToneCurve,
+    };
 
     use super::*;
 
@@ -323,7 +782,8 @@ mod tests {
     #[test]
     fn nchw_roundtrip_zero_two_fifty_five() {
         let input = ImageFrame::new(1, 2, vec![12, 34, 56, 200, 150, 100]).expect("valid frame");
-        let tensor = image_to_nchw_f32_with_normalization(&input, TensorNormalization::ZeroTwoFiftyFive);
+        let tensor =
+            image_to_nchw_f32_with_normalization(&input, TensorNormalization::ZeroTwoFiftyFive);
         let out = nchw_f32_to_image_with_normalization(
             1,
             2,
@@ -338,5 +798,143 @@ mod tests {
     fn fit_within_max_and_multiple_scales_down() {
         let (w, h) = fit_within_max_and_multiple(1920, 1080, 800, 8);
         assert_eq!((w, h), (800, 448));
+    }
+
+    #[test]
+    fn photo_edit_recipe_stage_keeps_shape() {
+        let input = ImageFrame::new(2, 1, vec![10, 20, 30, 200, 100, 50]).expect("valid frame");
+        let out = apply_photo_edit_recipe(input.clone(), &PhotoEditRecipe::default())
+            .expect("photo edit ok");
+        assert_eq!(out.width, input.width);
+        assert_eq!(out.height, input.height);
+        assert_eq!(out.data.len(), input.data.len());
+    }
+
+    #[test]
+    fn tone_curve_can_brighten_midtones() {
+        let input = ImageFrame::new(1, 1, vec![64, 64, 64]).expect("valid frame");
+        let out = apply_tone_curve(
+            input,
+            &ToneCurve {
+                points: vec![[0.0, 0.0], [0.25, 0.45], [1.0, 1.0]],
+            },
+        )
+        .expect("curve ok");
+        assert!(out.data[0] > 64);
+        assert_eq!(out.data[0], out.data[1]);
+        assert_eq!(out.data[1], out.data[2]);
+    }
+
+    #[test]
+    fn hsl_adjustments_target_matching_hues() {
+        let input = ImageFrame::new(1, 1, vec![40, 80, 220]).expect("valid frame");
+        let mut recipe = PhotoEditRecipe::default();
+        recipe.hsl.insert(
+            HslColor::Blue,
+            HslAdjustment {
+                hue: 0.0,
+                saturation: 0.4,
+                luminance: -0.2,
+            },
+        );
+
+        let out = apply_photo_edit_recipe(input.clone(), &recipe).expect("photo edit ok");
+        assert_ne!(out.data, input.data);
+        assert!(out.data[2] >= out.data[0]);
+    }
+
+    #[test]
+    fn shadows_lift_dark_pixels_more_than_bright_pixels() {
+        let input = ImageFrame::new(2, 1, vec![24, 24, 24, 220, 220, 220]).expect("valid frame");
+        let out = apply_global_adjustments(
+            input.clone(),
+            GlobalAdjustments {
+                shadows: 0.7,
+                ..GlobalAdjustments::default()
+            },
+        )
+        .expect("global adjustments ok");
+
+        let dark_delta = out.data[0] as i32 - input.data[0] as i32;
+        let bright_delta = out.data[3] as i32 - input.data[3] as i32;
+        assert!(dark_delta > bright_delta);
+    }
+
+    #[test]
+    fn highlights_reduce_bright_pixels_more_than_shadow_pixels() {
+        let input = ImageFrame::new(2, 1, vec![24, 24, 24, 240, 240, 240]).expect("valid frame");
+        let out = apply_global_adjustments(
+            input.clone(),
+            GlobalAdjustments {
+                highlights: -0.8,
+                ..GlobalAdjustments::default()
+            },
+        )
+        .expect("global adjustments ok");
+
+        let dark_delta = input.data[0] as i32 - out.data[0] as i32;
+        let bright_delta = input.data[3] as i32 - out.data[3] as i32;
+        assert!(bright_delta > dark_delta);
+    }
+
+    #[test]
+    fn vibrance_favors_desaturated_colors() {
+        let low_sat = apply_vibrance(0.15, 0.6, 210.0, 0.6);
+        let high_sat = apply_vibrance(0.85, 0.6, 210.0, 0.6);
+        assert!(low_sat - 0.15 > high_sat - 0.85);
+    }
+
+    #[test]
+    fn local_radial_mask_can_isolate_center_pixels() {
+        let input = ImageFrame::new(3, 1, vec![100, 100, 100, 100, 100, 100, 100, 100, 100])
+            .expect("valid frame");
+        let layer = LocalAdjustmentLayer {
+            name: Some("center lift".into()),
+            opacity: 1.0,
+            mask: MaskShape::Radial {
+                center_x: 0.5,
+                center_y: 0.5,
+                radius_x: 0.2,
+                radius_y: Some(0.8),
+                feather: 0.2,
+                invert: false,
+            },
+            global: GlobalAdjustments {
+                exposure: 0.5,
+                ..GlobalAdjustments::default()
+            },
+            tone_curve: None,
+            hsl: BTreeMap::new(),
+        };
+
+        let out = apply_local_adjustment_layer(input.clone(), &layer).expect("local layer ok");
+        assert!(out.data[3] > input.data[3]);
+        assert_eq!(out.data[0], input.data[0]);
+        assert_eq!(out.data[6], input.data[6]);
+    }
+
+    #[test]
+    fn luminance_range_mask_targets_highlights() {
+        let input = ImageFrame::new(2, 1, vec![32, 32, 32, 220, 220, 220]).expect("valid frame");
+        let layer = LocalAdjustmentLayer {
+            name: Some("recover highlights".into()),
+            opacity: 1.0,
+            mask: MaskShape::LuminanceRange {
+                min: 0.7,
+                max: 1.0,
+                feather: 0.1,
+                invert: false,
+            },
+            global: GlobalAdjustments {
+                highlights: -0.7,
+                ..GlobalAdjustments::default()
+            },
+            tone_curve: None,
+            hsl: BTreeMap::new(),
+        };
+
+        let out = apply_local_adjustment_layer(input.clone(), &layer).expect("local layer ok");
+        assert_eq!(out.data[0], input.data[0]);
+        assert!(out.data[3] < input.data[3]);
     }
 }
