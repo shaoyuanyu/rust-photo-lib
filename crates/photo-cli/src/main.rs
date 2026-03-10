@@ -41,7 +41,7 @@ struct Cli {
     #[arg(long = "hue", default_value_t = 0.0)]
     hue_shift_degrees: f32,
 
-    /// 风格迁移模型路径（ONNX）。
+    /// 编辑配方路径（JSON）。
     #[arg(long)]
     recipe: Option<PathBuf>,
     #[arg(long)]

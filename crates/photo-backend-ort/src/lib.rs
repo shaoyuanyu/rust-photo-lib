@@ -70,13 +70,12 @@ impl OnnxEngine for OrtEngine {
                 .map_err(|err| OnnxError::Inference(err.to_string()))?;
 
             let mut named = Vec::with_capacity(outputs.len());
-            for (idx, out) in outputs.into_iter().enumerate() {
+            for (name, out) in outputs.into_iter() {
                 let tensor = out
-                    .1
                     .try_extract_array::<f32>()
                     .map_err(|err| OnnxError::Inference(err.to_string()))?;
                 named.push(NamedTensor {
-                    name: format!("output_{idx}"),
+                    name,
                     shape: tensor.shape().to_vec(),
                     data: tensor.iter().copied().collect(),
                 });

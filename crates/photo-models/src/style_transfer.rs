@@ -110,11 +110,12 @@ impl StyleTransferModel {
         );
         let input_shape = vec![1, 3, target_h as usize, target_w as usize];
 
+        let candidates = self.input_name_candidates();
         let mut last_err = None;
         let mut outputs = None;
-        for input_name in self.input_name_candidates() {
+        for input_name in &candidates {
             let input = NamedTensor {
-                name: input_name,
+                name: input_name.clone(),
                 shape: input_shape.clone(),
                 data: tensor_data.clone(),
             };
@@ -136,7 +137,7 @@ impl StyleTransferModel {
                 .unwrap_or_else(|| "unknown inference error".to_string());
             PhotoError::Model(format!(
                 "failed to run style transfer with candidate inputs {:?}: {err_message}",
-                self.input_name_candidates()
+                candidates
             ))
         })?;
 

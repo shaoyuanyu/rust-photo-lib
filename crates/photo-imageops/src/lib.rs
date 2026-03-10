@@ -112,19 +112,7 @@ pub fn fit_within_max_and_multiple(
 
 /// 应用曝光/亮度/对比度/饱和度/色温/色调/色相调节。
 pub fn apply_basic_adjustments(input: ImageFrame, params: BasicAdjustments) -> Result<ImageFrame> {
-    apply_global_adjustments(
-        input,
-        GlobalAdjustments {
-            exposure: params.exposure,
-            brightness: params.brightness,
-            contrast: params.contrast - 1.0,
-            saturation: params.saturation - 1.0,
-            temperature: params.temperature,
-            tint: params.tint,
-            hue_shift_degrees: params.hue_shift_degrees,
-            ..GlobalAdjustments::default()
-        },
-    )
+    apply_global_adjustments(input, GlobalAdjustments::from(params))
 }
 
 /// 根据照片编辑配方执行全局与局部调整。
@@ -191,13 +179,7 @@ pub fn apply_global_adjustments(
         let luma = rgb_luma(r, g, b);
         // 亮度控制基于 luma 进行区域分配后，再做对比度缩放。
         v = apply_tone_controls(v, luma, params, contrast_mul);
-        h += params.hue_shift_degrees;
-        if h < 0.0 {
-            h += 360.0;
-        }
-        if h >= 360.0 {
-            h -= 360.0;
-        }
+        h = (h + params.hue_shift_degrees).rem_euclid(360.0);
         s *= saturation_mul;
         // 自然饱和度优先提升低饱和像素，并保护肤色与高光。
         s = apply_vibrance(s, params.vibrance, h, v);
@@ -924,6 +906,23 @@ mod tests {
         let dark_delta = input.data[0] as i32 - out.data[0] as i32;
         let bright_delta = input.data[3] as i32 - out.data[3] as i32;
         assert!(bright_delta > dark_delta);
+    }
+
+    #[test]
+    fn hue_shift_wraps_full_turns() {
+        let input = ImageFrame::new(1, 1, vec![10, 200, 50]).expect("valid frame");
+        let neutral = apply_global_adjustments(input.clone(), GlobalAdjustments::default())
+            .expect("global adjustments ok");
+        let wrapped = apply_global_adjustments(
+            input,
+            GlobalAdjustments {
+                hue_shift_degrees: 720.0,
+                ..GlobalAdjustments::default()
+            },
+        )
+        .expect("global adjustments ok");
+
+        assert_eq!(neutral.data, wrapped.data);
     }
 
     #[test]

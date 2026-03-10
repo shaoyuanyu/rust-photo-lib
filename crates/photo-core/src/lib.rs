@@ -85,6 +85,21 @@ impl Default for BasicAdjustments {
     }
 }
 
+impl From<BasicAdjustments> for GlobalAdjustments {
+    fn from(value: BasicAdjustments) -> Self {
+        Self {
+            exposure: value.exposure,
+            brightness: value.brightness,
+            contrast: value.contrast - 1.0,
+            saturation: value.saturation - 1.0,
+            temperature: value.temperature,
+            tint: value.tint,
+            hue_shift_degrees: value.hue_shift_degrees,
+            ..GlobalAdjustments::default()
+        }
+    }
+}
+
 pub const PHOTO_EDIT_RECIPE_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -279,16 +294,7 @@ impl PhotoEditRecipe {
 impl From<BasicAdjustments> for PhotoEditRecipe {
     fn from(value: BasicAdjustments) -> Self {
         Self {
-            global: GlobalAdjustments {
-                exposure: value.exposure,
-                brightness: value.brightness,
-                contrast: value.contrast - 1.0,
-                saturation: value.saturation - 1.0,
-                temperature: value.temperature,
-                tint: value.tint,
-                hue_shift_degrees: value.hue_shift_degrees,
-                ..GlobalAdjustments::default()
-            },
+            global: GlobalAdjustments::from(value),
             ..Self::default()
         }
     }
