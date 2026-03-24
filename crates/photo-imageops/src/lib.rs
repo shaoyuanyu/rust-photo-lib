@@ -1,11 +1,18 @@
 //! 图像读写与基础处理工具。
 
+mod beauty;
+
 use std::{collections::BTreeMap, path::Path};
 
 use image::{ImageBuffer, Rgb, RgbImage};
 use photo_core::{
     BasicAdjustments, GlobalAdjustments, HslAdjustment, HslColor, ImageFrame, LocalAdjustmentLayer,
     MaskShape, PhotoEditRecipe, PhotoError, Result, Stage, ToneCurve,
+};
+
+pub use beauty::{
+    CurveWarpPoint, EyeWarpPoint, FaceWarpAnchors, apply_beauty_filters, apply_face_reshape,
+    apply_skin_smoothing, apply_whiteness,
 };
 
 /// 张量转换的归一化选项。

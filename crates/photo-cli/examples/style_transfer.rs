@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 
 use photo_core::{BasicAdjustments, Pipeline};
-use photo_imageops::{BasicAdjustStage, load_image};
 #[cfg(feature = "tract-backend")]
 use photo_imageops::save_image;
+use photo_imageops::{BasicAdjustStage, load_image};
 #[cfg(feature = "tract-backend")]
 use photo_models::StyleTransferModel;
 

@@ -75,7 +75,7 @@ impl OnnxEngine for OrtEngine {
                     .try_extract_array::<f32>()
                     .map_err(|err| OnnxError::Inference(err.to_string()))?;
                 named.push(NamedTensor {
-                    name,
+                    name: name.to_string(),
                     shape: tensor.shape().to_vec(),
                     data: tensor.iter().copied().collect(),
                 });

@@ -120,6 +120,42 @@ pub struct GlobalAdjustments {
     pub blacks: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BeautySettings {
+    pub skin_smoothing: f32,
+    pub detail_sharpen: f32,
+    pub whiteness: f32,
+    pub thin_face: f32,
+    pub big_eye: f32,
+}
+
+impl BeautySettings {
+    pub fn clamped(self) -> Self {
+        Self {
+            skin_smoothing: self.skin_smoothing.clamp(0.0, 1.0),
+            detail_sharpen: self.detail_sharpen.clamp(0.0, 1.0),
+            whiteness: self.whiteness.clamp(0.0, 1.0),
+            thin_face: self.thin_face.clamp(0.0, 1.0),
+            big_eye: self.big_eye.clamp(0.0, 1.0),
+        }
+    }
+
+    pub fn is_identity(self) -> bool {
+        let settings = self.clamped();
+        settings.skin_smoothing <= f32::EPSILON
+            && settings.detail_sharpen <= f32::EPSILON
+            && settings.whiteness <= f32::EPSILON
+            && settings.thin_face <= f32::EPSILON
+            && settings.big_eye <= f32::EPSILON
+    }
+
+    pub fn needs_face_detection(self) -> bool {
+        let settings = self.clamped();
+        settings.thin_face > f32::EPSILON || settings.big_eye > f32::EPSILON
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToneCurve {
     pub points: Vec<[f32; 2]>,
@@ -262,6 +298,8 @@ pub struct PhotoEditRecipe {
     #[serde(default)]
     pub global: GlobalAdjustments,
     #[serde(default)]
+    pub beauty: BeautySettings,
+    #[serde(default)]
     pub tone_curve: Option<ToneCurve>,
     #[serde(default)]
     pub hsl: BTreeMap<HslColor, HslAdjustment>,
@@ -275,6 +313,7 @@ impl Default for PhotoEditRecipe {
             version: PHOTO_EDIT_RECIPE_VERSION,
             intent: None,
             global: GlobalAdjustments::default(),
+            beauty: BeautySettings::default(),
             tone_curve: None,
             hsl: BTreeMap::new(),
             local_adjustments: Vec::new(),
@@ -421,6 +460,7 @@ mod tests {
         assert_eq!(recipe.global.temperature, -0.05);
         assert_eq!(recipe.global.tint, 0.02);
         assert_eq!(recipe.global.hue_shift_degrees, 12.0);
+        assert_eq!(recipe.beauty, BeautySettings::default());
     }
 
     #[test]
@@ -463,5 +503,72 @@ mod tests {
             }
             _ => panic!("expected radial mask"),
         }
+    }
+
+    #[test]
+    fn beauty_settings_clamp_into_supported_range() {
+        let settings = BeautySettings {
+            skin_smoothing: -1.0,
+            detail_sharpen: 1.5,
+            whiteness: 0.5,
+            thin_face: 2.0,
+            big_eye: -0.25,
+        }
+        .clamped();
+
+        assert_eq!(
+            settings,
+            BeautySettings {
+                skin_smoothing: 0.0,
+                detail_sharpen: 1.0,
+                whiteness: 0.5,
+                thin_face: 1.0,
+                big_eye: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn beauty_settings_flags_detection_only_for_geometry_controls() {
+        let beauty = BeautySettings {
+            skin_smoothing: 0.4,
+            whiteness: 0.3,
+            ..BeautySettings::default()
+        };
+        assert!(!beauty.needs_face_detection());
+
+        let beauty = BeautySettings {
+            thin_face: 0.2,
+            ..BeautySettings::default()
+        };
+        assert!(beauty.needs_face_detection());
+    }
+
+    #[test]
+    fn recipe_parses_beauty_settings_from_json() {
+        let json = r#"
+        {
+          "version": 1,
+          "beauty": {
+            "skin_smoothing": 0.45,
+            "detail_sharpen": 0.15,
+            "whiteness": 0.2,
+            "thin_face": 0.1,
+            "big_eye": 0.05
+          }
+        }
+        "#;
+
+        let recipe: PhotoEditRecipe = serde_json::from_str(json).expect("recipe json");
+        assert_eq!(
+            recipe.beauty,
+            BeautySettings {
+                skin_smoothing: 0.45,
+                detail_sharpen: 0.15,
+                whiteness: 0.2,
+                thin_face: 0.1,
+                big_eye: 0.05,
+            }
+        );
     }
 }

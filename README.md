@@ -5,11 +5,13 @@ Rust 照片处理库（MVP）
 当前已实现：
 - 基础调色：曝光、亮度、对比度、饱和度、色温、色调（Hue）、Tint
 - Recipe 驱动调色接口（JSON）：全局参数、Tone Curve、HSL 分区、局部 Mask Layer
+- 美颜：磨皮（`skin_smoothing`）、细节回补（`detail_sharpen`）、参数化美白（`whiteness`）
+- 人脸几何美型：瘦脸（`thin_face`）、大眼（`big_eye`）
 - 可组合 Pipeline API
 - ONNX 统一抽象层（`OnnxEngine`）
 - 双后端实现：`tract` 与 `ort`（均通过 feature 开关）
 - 风格迁移模型适配器（NCHW/f32 预处理与后处理）
-- CLI 最小闭环：输入图片 -> 基础调色 -> 可选风格迁移 -> 输出图片
+- CLI 最小闭环：输入图片 -> 基础调色 / 美颜 -> 可选风格迁移 -> 输出图片
 
 ## Workspace 结构
 
@@ -18,7 +20,7 @@ Rust 照片处理库（MVP）
 - `crates/photo-onnx`: ONNX 后端抽象接口
 - `crates/photo-backend-tract`: tract 后端实现
 - `crates/photo-backend-ort`: ort 后端实现
-- `crates/photo-models`: 模型适配器（当前含 style transfer）
+- `crates/photo-models`: 模型适配器（当前含 style transfer、face detector、face landmark、face beauty processor）
 - `crates/photo-cli`: 命令行入口
 
 ## 构建
@@ -69,6 +71,27 @@ cargo run -p photo-cli -- \
   --recipe recipe.json
 ```
 
+使用 recipe 驱动美颜（仅磨皮/美白，不依赖人脸模型）：
+
+```bash
+cargo run -p photo-cli --features ort-backend -- \
+  --input portrait.jpg \
+  --output portrait_beauty.jpg \
+  --recipe beauty.json
+```
+
+使用 recipe 驱动完整美颜（含瘦脸/大眼，需要人脸检测与关键点模型）：
+
+```bash
+cargo run -p photo-cli --features ort-backend -- \
+  --input portrait.jpg \
+  --output portrait_beauty_full.jpg \
+  --recipe beauty_full.json \
+  --backend ort \
+  --face-det-model ultraface.onnx \
+  --face-landmark-model pfld.onnx
+```
+
 `recipe.json` 示例：
 
 ```json
@@ -90,6 +113,26 @@ cargo run -p photo-cli -- \
   "hsl": {
     "blue": { "saturation": 0.15, "luminance": -0.08 },
     "orange": { "luminance": 0.05 }
+  }
+}
+```
+
+带美颜参数的 `recipe.json` 示例：
+
+```json
+{
+  "version": 1,
+  "beauty": {
+    "skin_smoothing": 0.45,
+    "detail_sharpen": 0.15,
+    "whiteness": 0.2,
+    "thin_face": 0.35,
+    "big_eye": 0.4
+  },
+  "global": {
+    "exposure": 0.05,
+    "contrast": 0.06,
+    "saturation": 0.04
   }
 }
 ```
@@ -204,6 +247,10 @@ cargo check -p photo-cli --features ort-backend
 
 ## 说明
 
+- `beauty.skin_smoothing`、`beauty.detail_sharpen`、`beauty.whiteness` 不依赖人脸模型，可直接运行。
+- `beauty.thin_face`、`beauty.big_eye` 依赖 `--face-det-model` 与 `--face-landmark-model`，并且当前只支持 `--backend ort`。
+- 当前人脸美型按单张图的“主人脸”处理；多人脸时会自动选择面积更大且更靠近画面中心的人脸。
+- 当前 landmark 锚点构建支持常见的 `68-point` 与 `98-point` 输出；测试时使用 `Ultra-Light-Fast-Generic-Face-Detector` + `PFLD` ONNX 组合。
 - 当前模型适配默认输出形状为 `[1, 3, H, W]`。
 - 风格迁移默认使用 `[0,255]` 像素值语义（与 `rust-style-transfer` 对齐）。
 - 风格迁移默认将输入缩放到 `max_dim=800` 且边长对齐到 `8` 的倍数，再在输出端恢复到原图尺寸。

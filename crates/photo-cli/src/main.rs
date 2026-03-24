@@ -4,9 +4,11 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use photo_core::{GlobalAdjustments, ImageFrame, PhotoEditRecipe, Pipeline};
-use photo_imageops::{PhotoEditStage, load_image, save_image};
+use photo_core::{BeautySettings, GlobalAdjustments, ImageFrame, PhotoEditRecipe, Pipeline};
+use photo_imageops::{PhotoEditStage, apply_beauty_filters, load_image, save_image};
 use photo_models::StyleTransferModel;
+#[cfg(feature = "ort-backend")]
+use photo_models::{FaceBeautyProcessor, FaceDetectorModel, FaceLandmarkModel};
 
 /// 命令行参数定义。
 #[derive(Parser, Debug)]
@@ -49,6 +51,10 @@ struct Cli {
 
     #[arg(long)]
     style_model: Option<PathBuf>,
+    #[arg(long)]
+    face_det_model: Option<PathBuf>,
+    #[arg(long)]
+    face_landmark_model: Option<PathBuf>,
     /// 推理后端选择。
     #[arg(long, value_enum, default_value_t = Backend::Ort)]
     backend: Backend,
@@ -88,9 +94,12 @@ fn main() -> Result<()> {
     let mut image = load_image(&input_path).map_err(anyhow::Error::msg)?;
 
     let mut pipeline = Pipeline::new();
-    pipeline.push(PhotoEditStage { recipe });
+    pipeline.push(PhotoEditStage {
+        recipe: recipe.clone(),
+    });
 
     image = pipeline.run(image).map_err(anyhow::Error::msg)?;
+    image = apply_face_beauty(&cli, &recipe, &image)?;
 
     if let Some(model_path) = &cli.style_model {
         let model = StyleTransferModel::new(model_path);
@@ -102,6 +111,36 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to save image to {}", output_path.display()))?;
 
     Ok(())
+}
+
+fn apply_face_beauty(
+    cli: &Cli,
+    recipe: &PhotoEditRecipe,
+    image: &ImageFrame,
+) -> Result<ImageFrame> {
+    let beauty = recipe.beauty.clamped();
+    if beauty.is_identity() {
+        return Ok(image.clone());
+    }
+
+    if !beauty.needs_face_detection() {
+        return apply_beauty_filters(image.clone(), beauty).map_err(anyhow::Error::msg);
+    }
+
+    if !matches!(cli.backend, Backend::Ort) {
+        return Err(anyhow::anyhow!(
+            "face reshape only supports the `ort` backend; rerun with `--backend ort`"
+        ));
+    }
+
+    let det_model = cli.face_det_model.as_ref().with_context(|| {
+        "face reshape requires `--face-det-model` when `beauty.thin_face` or `beauty.big_eye` is enabled"
+    })?;
+    let landmark_model = cli.face_landmark_model.as_ref().with_context(|| {
+        "face reshape requires `--face-landmark-model` when `beauty.thin_face` or `beauty.big_eye` is enabled"
+    })?;
+
+    run_ort_face_beauty(&beauty, det_model, landmark_model, image)
 }
 
 fn load_effective_recipe(cli: &Cli) -> Result<PhotoEditRecipe> {
@@ -144,6 +183,36 @@ fn apply_style_transfer(
         Backend::Tract => run_tract_style_transfer(model, image),
         Backend::Ort => run_ort_style_transfer(model, image),
     }
+}
+
+#[cfg(feature = "ort-backend")]
+fn run_ort_face_beauty(
+    beauty: &BeautySettings,
+    det_model: &PathBuf,
+    landmark_model: &PathBuf,
+    image: &ImageFrame,
+) -> Result<ImageFrame> {
+    let processor = FaceBeautyProcessor::new(
+        FaceDetectorModel::new(det_model),
+        FaceLandmarkModel::new(landmark_model),
+    );
+    let mut detector_engine = photo_backend_ort::OrtEngine::default();
+    let mut landmark_engine = photo_backend_ort::OrtEngine::default();
+    processor
+        .process(&mut detector_engine, &mut landmark_engine, image, *beauty)
+        .map_err(anyhow::Error::msg)
+}
+
+#[cfg(not(feature = "ort-backend"))]
+fn run_ort_face_beauty(
+    _beauty: &BeautySettings,
+    _det_model: &PathBuf,
+    _landmark_model: &PathBuf,
+    _image: &ImageFrame,
+) -> Result<ImageFrame> {
+    Err(anyhow::anyhow!(
+        "face reshape requires the ORT backend. Rebuild with `--features ort-backend`"
+    ))
 }
 
 /// 使用 Tract 后端执行风格迁移（需启用特性）。

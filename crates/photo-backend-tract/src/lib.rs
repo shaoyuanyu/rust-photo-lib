@@ -74,10 +74,8 @@ impl OnnxEngine for TractEngine {
 
             let mut tv = tvec![];
             for input in inputs {
-                let array =
-                    ndarray::ArrayD::from_shape_vec(input.shape.clone(), input.data.clone())
-                        .map_err(|err| OnnxError::InvalidTensor(err.to_string()))?;
-                let tensor = array.into_tensor();
+                let tensor = Tensor::from_shape(&input.shape, &input.data)
+                    .map_err(|err| OnnxError::InvalidTensor(err.to_string()))?;
                 tv.push(tensor.into());
             }
 
