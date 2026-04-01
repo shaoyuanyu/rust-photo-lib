@@ -1,12 +1,13 @@
 //! 照片处理命令行工具入口。
 
-use std::{fs, path::PathBuf};
+use std::{fs, path::{Path, PathBuf}};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use photo_core::{BeautySettings, GlobalAdjustments, ImageFrame, PhotoEditRecipe, Pipeline};
 use photo_imageops::{PhotoEditStage, apply_beauty_filters, load_image, save_image};
 use photo_models::StyleTransferModel;
+use photo_onnx::OnnxEngine;
 #[cfg(feature = "ort-backend")]
 use photo_models::{FaceBeautyProcessor, FaceDetectorModel, FaceLandmarkModel};
 
@@ -103,7 +104,10 @@ fn main() -> Result<()> {
 
     if let Some(model_path) = &cli.style_model {
         let model = StyleTransferModel::new(model_path);
-        image = apply_style_transfer(cli.backend, &model, &image)?;
+        image = match cli.backend {
+            Backend::Tract => apply_style_transfer::<photo_backend_tract::TractEngine>(cli.backend, &model, &image)?,
+            Backend::Ort => apply_style_transfer::<photo_backend_ort::OrtEngine>(cli.backend, &model, &image)?,
+        };
     }
 
     save_image(&image, &output_path)
@@ -174,22 +178,16 @@ fn set_if_non_default(target: &mut f32, candidate: f32, default: f32) {
 }
 
 /// 根据后端选择执行风格迁移。
-fn apply_style_transfer(
-    backend: Backend,
-    model: &StyleTransferModel,
-    image: &ImageFrame,
-) -> Result<ImageFrame> {
-    match backend {
-        Backend::Tract => run_tract_style_transfer(model, image),
-        Backend::Ort => run_ort_style_transfer(model, image),
-    }
+fn apply_style_transfer<E: OnnxEngine + Default>(_: Backend, model: &StyleTransferModel, image: &ImageFrame) -> Result<ImageFrame> {
+    let mut engine = E::default();
+    model.run(&mut engine, image).map_err(anyhow::Error::msg)
 }
 
 #[cfg(feature = "ort-backend")]
 fn run_ort_face_beauty(
     beauty: &BeautySettings,
-    det_model: &PathBuf,
-    landmark_model: &PathBuf,
+    det_model: &Path,
+    landmark_model: &Path,
     image: &ImageFrame,
 ) -> Result<ImageFrame> {
     let processor = FaceBeautyProcessor::new(
@@ -206,8 +204,8 @@ fn run_ort_face_beauty(
 #[cfg(not(feature = "ort-backend"))]
 fn run_ort_face_beauty(
     _beauty: &BeautySettings,
-    _det_model: &PathBuf,
-    _landmark_model: &PathBuf,
+    _det_model: &Path,
+    _landmark_model: &Path,
     _image: &ImageFrame,
 ) -> Result<ImageFrame> {
     Err(anyhow::anyhow!(
@@ -220,30 +218,4 @@ fn run_ort_face_beauty(
 fn run_tract_style_transfer(model: &StyleTransferModel, image: &ImageFrame) -> Result<ImageFrame> {
     let mut engine = photo_backend_tract::TractEngine::default();
     model.run(&mut engine, image).map_err(anyhow::Error::msg)
-}
-
-/// Tract 后端未启用时的报错实现。
-#[cfg(not(feature = "tract-backend"))]
-fn run_tract_style_transfer(
-    _model: &StyleTransferModel,
-    _image: &ImageFrame,
-) -> Result<ImageFrame> {
-    Err(anyhow::anyhow!(
-        "tract backend is not enabled. Rebuild with `--features tract-backend`"
-    ))
-}
-
-/// 使用 ORT 后端执行风格迁移（需启用特性）。
-#[cfg(feature = "ort-backend")]
-fn run_ort_style_transfer(model: &StyleTransferModel, image: &ImageFrame) -> Result<ImageFrame> {
-    let mut engine = photo_backend_ort::OrtEngine::default();
-    model.run(&mut engine, image).map_err(anyhow::Error::msg)
-}
-
-/// ORT 后端未启用时的报错实现。
-#[cfg(not(feature = "ort-backend"))]
-fn run_ort_style_transfer(_model: &StyleTransferModel, _image: &ImageFrame) -> Result<ImageFrame> {
-    Err(anyhow::anyhow!(
-        "ort backend is not enabled. Rebuild with `--features ort-backend`"
-    ))
 }

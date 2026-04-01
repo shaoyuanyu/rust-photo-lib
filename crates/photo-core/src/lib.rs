@@ -143,16 +143,16 @@ impl BeautySettings {
 
     pub fn is_identity(self) -> bool {
         let settings = self.clamped();
-        settings.skin_smoothing <= f32::EPSILON
-            && settings.detail_sharpen <= f32::EPSILON
-            && settings.whiteness <= f32::EPSILON
-            && settings.thin_face <= f32::EPSILON
-            && settings.big_eye <= f32::EPSILON
+        settings.skin_smoothing.abs() < f32::EPSILON
+            && settings.detail_sharpen.abs() < f32::EPSILON
+            && settings.whiteness.abs() < f32::EPSILON
+            && settings.thin_face.abs() < f32::EPSILON
+            && settings.big_eye.abs() < f32::EPSILON
     }
 
     pub fn needs_face_detection(self) -> bool {
         let settings = self.clamped();
-        settings.thin_face > f32::EPSILON || settings.big_eye > f32::EPSILON
+        settings.thin_face.abs() > f32::EPSILON || settings.big_eye.abs() > f32::EPSILON
     }
 }
 
@@ -362,7 +362,7 @@ pub trait Stage: Debug + Send + Sync {
 /// 按顺序执行的阶段集合。
 #[derive(Default)]
 pub struct Pipeline {
-    stages: Vec<Box<dyn Stage>>,
+    stages: Vec<Box<dyn Stage + Send + Sync>>,
 }
 
 impl Pipeline {
@@ -374,7 +374,7 @@ impl Pipeline {
     /// 向管线追加一个阶段。
     pub fn push<S>(&mut self, stage: S)
     where
-        S: Stage + 'static,
+        S: Stage + Send + Sync + 'static,
     {
         self.stages.push(Box::new(stage));
     }

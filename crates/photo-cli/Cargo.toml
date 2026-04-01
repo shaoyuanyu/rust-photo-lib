@@ -16,4 +16,5 @@ photo-backend-tract = { path = "../photo-backend-tract" }
 photo-core = { path = "../photo-core" }
 photo-imageops = { path = "../photo-imageops" }
 photo-models = { path = "../photo-models" }
+photo-onnx = { path = "../photo-onnx" }
 serde_json = { workspace = true }
